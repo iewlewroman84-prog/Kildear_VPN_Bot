@@ -120,15 +120,41 @@ class XrayAPI:
         self.session = requests.Session()
         self.session.verify = False
         self.token = XRAY_API_TOKEN
-        # Правильный базовый URL - без дублирования /panel
         self.base_url = f"{XRAY_PANEL_URL}{XRAY_PANEL_PATH}"
-        logger.info(f"✅ API URL: {self.base_url}")
+        self.logged_in = False
+        self.login()
+    
+    def login(self) -> bool:
+        """Авторизация для получения кук"""
+        try:
+            url = f"{self.base_url}/login"
+            data = {
+                "username": XRAY_USERNAME,
+                "password": XRAY_PASSWORD
+            }
+            
+            response = self.session.post(url, json=data, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    self.logged_in = True
+                    logger.info("✅ Успешная авторизация в панели")
+                    return True
+                else:
+                    logger.error(f"❌ Ошибка авторизации: {result}")
+                    return False
+            else:
+                logger.error(f"❌ HTTP {response.status_code}: {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return False
     
     def add_client(self, uuid: str, email: str, expiry_time: int) -> bool:
-        """Добавление клиента через API - ПРАВИЛЬНЫЙ ЭНДПОИНТ"""
+        """Добавление клиента через API"""
         try:
-            # ПРАВИЛЬНЫЙ URL: /panel/api/inbounds/addClient
-            # НЕ /xray/inbound/addClient
+            # ПРАВИЛЬНЫЙ API ПУТЬ из вашего URL
             url = f"{self.base_url}/panel/api/inbounds/addClient"
             
             payload = {
@@ -154,21 +180,24 @@ class XrayAPI:
             logger.info(f"📤 URL: {url}")
             logger.info(f"📤 Клиент: {email}")
             logger.info(f"📤 Inbound: {XRAY_INBOUND_ID}")
-            logger.info(f"📤 UUID: {uuid}")
             
             response = self.session.post(url, json=payload, headers=headers, timeout=30)
             
             logger.info(f"📥 Статус: {response.status_code}")
-            logger.info(f"📥 Ответ: {response.text[:500]}")
             
             if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    logger.info(f"✅ Клиент {email} создан!")
+                try:
+                    result = response.json()
+                    logger.info(f"📥 Ответ: {json.dumps(result, indent=2)}")
+                    if result.get('success'):
+                        logger.info(f"✅ Клиент {email} создан!")
+                        return True
+                    else:
+                        logger.error(f"❌ Ошибка: {result}")
+                        return False
+                except:
+                    logger.info(f"✅ Клиент создан (статус 200)")
                     return True
-                else:
-                    logger.error(f"❌ Ошибка API: {result}")
-                    return False
             else:
                 logger.error(f"❌ HTTP {response.status_code}: {response.text}")
                 return False
@@ -177,38 +206,36 @@ class XrayAPI:
             logger.error(f"❌ Ошибка: {e}")
             return False
     
-    def get_inbounds(self):
-        """Получение списка inbounds для проверки"""
+    def get_clients(self) -> Optional[list]:
+        """Получение списка клиентов"""
         try:
-            url = f"{self.base_url}/panel/api/inbounds/list"
+            url = f"{self.base_url}/panel/api/inbounds/get/{XRAY_INBOUND_ID}"
             headers = {"Authorization": f"Bearer {self.token}"}
             
             response = self.session.get(url, headers=headers, timeout=30)
-            logger.info(f"📥 Inbounds статус: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
-                logger.info(f"📥 Inbounds: {json.dumps(result, indent=2)[:500]}")
-                return result
+                if result.get('success'):
+                    return result.get('obj', {}).get('clients', [])
             return None
         except Exception as e:
             logger.error(f"Ошибка: {e}")
             return None
 
-# Создаем экземпляр API и проверяем
+# Создаем экземпляр API
 xray_api = XrayAPI()
 
-# Проверяем подключение к панели
-logger.info("🔍 Проверка подключения к панели...")
-inbounds = xray_api.get_inbounds()
-if inbounds:
-    logger.info("✅ Панель доступна!")
+# Проверяем подключение
+logger.info("🔍 Проверка подключения...")
+clients = xray_api.get_clients()
+if clients is not None:
+    logger.info(f"✅ Найдено клиентов: {len(clients)}")
 else:
-    logger.warning("⚠️ Панель не отвечает или ошибка авторизации")
+    logger.warning("⚠️ Не удалось получить список клиентов")
 
 # ======================= ГЕНЕРАЦИЯ КЛЮЧА =======================
 def generate_vless_link(uuid: str, email: str) -> str:
-    """Генерация VLESS ключа для Kildear VPN (WS)"""
     vless_link = (
         f"vless://{uuid}@"
         f"{VPN_SERVER_IP}:{VPN_SERVER_PORT}"
@@ -222,20 +249,17 @@ def generate_vless_link(uuid: str, email: str) -> str:
     return vless_link
 
 def create_vpn_user(user_id: int, plan_id: str) -> tuple:
-    """Создание пользователя"""
     user_uuid = str(uuid.uuid4())
     email = f"user_{user_id}_{int(datetime.now().timestamp())}"
-    
     plan = PLANS[plan_id]
     expiry_time = int((datetime.now() + timedelta(days=plan['days'])).timestamp() * 1000)
     
-    # Пытаемся создать клиента
     success = xray_api.add_client(user_uuid, email, expiry_time)
     
     if success:
         logger.info(f"✅ Клиент создан: {email}")
     else:
-        logger.warning(f"⚠️ Клиент НЕ создан! Но ключ будет сгенерирован для теста")
+        logger.warning(f"⚠️ Клиент НЕ создан! Ключ будет для теста")
     
     vless_link = generate_vless_link(user_uuid, email)
     return vless_link, user_uuid, email
@@ -384,46 +408,28 @@ def get_keys_keyboard():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
+    create_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
     
-    create_user(
-        user_id,
-        message.from_user.username,
-        message.from_user.first_name,
-        message.from_user.last_name
-    )
-    
-    welcome_text = f"""
+    text = f"""
 🌟 <b>Добро пожаловать в VPN сервис Kildear!</b>
 
-📋 <b>Доступные тарифы:</b>
+📋 Тарифы:
 • 🎁 2 дня бесплатно
 • 🔥 1 месяц — 139 ₽
 • ⭐ 3 месяца — 469 ₽
 • 💎 1 год — 899 ₽
-
-Используйте кнопки ниже.
 """
-    
-    await message.answer(
-        welcome_text,
-        reply_markup=get_main_keyboard(),
-        parse_mode="HTML"
-    )
+    await message.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "🏠 <b>Главное меню</b>",
-        reply_markup=get_main_keyboard(),
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text("🏠 Главное меню", reply_markup=get_main_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "buy_subscription")
 async def show_plans(callback: CallbackQuery):
     active_sub = get_active_subscription(callback.from_user.id)
-    
-    plans_text = "📱 <b>Выберите тариф:</b>\n\n"
+    plans_text = "📱 Выберите тариф:\n\n"
     
     if active_sub:
         try:
@@ -438,11 +444,7 @@ async def show_plans(callback: CallbackQuery):
         price_text = f"{plan['price']} ₽" if plan['price'] > 0 else "Бесплатно"
         plans_text += f"{plan['emoji']} {plan['label']} — {price_text}\n"
     
-    await callback.message.edit_text(
-        plans_text,
-        reply_markup=get_plans_keyboard(),
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(plans_text, reply_markup=get_plans_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "my_keys")
@@ -451,36 +453,18 @@ async def show_keys(callback: CallbackQuery):
     keys = get_user_vpn_keys(user_id)
     
     if not keys:
-        keys_text = "🔑 <b>Нет активных ключей</b>\n\nКупите подписку."
-        await callback.message.edit_text(
-            keys_text,
-            reply_markup=get_keys_keyboard(),
-            parse_mode="HTML"
-        )
+        await callback.message.edit_text("🔑 Нет активных ключей", reply_markup=get_keys_keyboard(), parse_mode="HTML")
         await callback.answer()
         return
     
-    keys_text = "🔑 <b>Ваши ключи:</b>\n\n"
-    
+    text = "🔑 Ваши ключи:\n\n"
     for idx, key_data in enumerate(keys, 1):
-        try:
-            key, expires_at, status, devices, port = key_data
-            
-            expires = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S.%f')
-            days_left = (expires - datetime.now()).days
-            
-            keys_text += f"<b>Ключ #{idx}</b>\n"
-            keys_text += f"<code>{key}</code>\n"
-            keys_text += f"📱 Устройств: {devices}\n"
-            keys_text += f"⏳ До: {expires.strftime('%d.%m.%Y')} ({days_left} дн.)\n\n"
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
+        key, expires_at, status, devices, port = key_data
+        expires = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S.%f')
+        days_left = (expires - datetime.now()).days
+        text += f"<b>#{idx}</b>\n<code>{key}</code>\n📱 {devices} уст. ⏳ {days_left} дн.\n\n"
     
-    await callback.message.edit_text(
-        keys_text,
-        reply_markup=get_keys_keyboard(),
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(text, reply_markup=get_keys_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "my_subscription")
@@ -489,45 +473,31 @@ async def show_subscription(callback: CallbackQuery):
     active_sub = get_active_subscription(user_id)
     
     if not active_sub:
-        await callback.message.edit_text(
-            "❌ <b>Нет активной подписки</b>",
-            reply_markup=get_main_keyboard(),
-            parse_mode="HTML"
-        )
+        await callback.message.edit_text("❌ Нет активной подписки", reply_markup=get_main_keyboard(), parse_mode="HTML")
         await callback.answer()
         return
     
     subscription_url = f"{SUBSCRIPTION_URL}/{active_sub.get('subscription_uuid', '')}"
+    end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
     
     text = f"""
-📥 <b>Ссылка для подписки:</b>
-
+📥 Ссылка для подписки:
 <code>{subscription_url}</code>
 
-📅 До: {datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')}
+📅 До: {end_date.strftime('%d.%m.%Y')}
 """
-    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Копировать", callback_data=f"copy_sub_{active_sub.get('subscription_uuid', '')}")],
+        [InlineKeyboardButton(text="📋 Копировать", callback_data=f"copy_{active_sub.get('subscription_uuid', '')}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     
-    await callback.message.edit_text(
-        text,
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("copy_sub_"))
+@dp.callback_query(F.data.startswith("copy_"))
 async def copy_sub(callback: CallbackQuery):
-    uuid_val = callback.data.replace("copy_sub_", "")
-    url = f"{SUBSCRIPTION_URL}/{uuid_val}"
-    
-    await callback.message.answer(
-        f"🔗 <code>{url}</code>",
-        parse_mode="HTML"
-    )
+    uuid_val = callback.data.replace("copy_", "")
+    await callback.message.answer(f"🔗 <code>{SUBSCRIPTION_URL}/{uuid_val}</code>", parse_mode="HTML")
     await callback.answer("✅ Скопируйте!")
 
 @dp.callback_query(F.data == "refresh_keys")
@@ -538,14 +508,12 @@ async def refresh_keys(callback: CallbackQuery):
 async def process_plan(callback: CallbackQuery):
     plan_id = callback.data.replace("plan_", "")
     plan = PLANS.get(plan_id)
-    
     if not plan:
         await callback.answer("❌ Тариф не найден")
         return
     
     user_id = callback.from_user.id
     
-    # Бесплатный тариф
     if plan['price'] == 0:
         conn = sqlite3.connect('subscriptions.db')
         c = conn.cursor()
@@ -557,50 +525,37 @@ async def process_plan(callback: CallbackQuery):
             await callback.answer("❌ Вы уже использовали бесплатный период!", show_alert=True)
             return
         
-        # Активируем
         create_subscription(user_id, plan_id, 0)
-        
         active_sub = get_active_subscription(user_id)
         vpn_key = active_sub.get('vpn_key') if active_sub else None
         
         text = f"""
-🎉 <b>Бесплатная подписка активирована!</b>
+🎉 Бесплатная подписка активирована!
 
 📅 {plan['days']} дней
 🔌 Порт: {VPN_SERVER_PORT}
 
-🔑 <b>Ключ:</b>
+🔑 Ключ:
 <code>{vpn_key}</code>
 """
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_main_keyboard(),
-            parse_mode="HTML"
-        )
+        await callback.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
         await callback.answer()
         return
     
-    # Платный - тестовая активация
     text = f"""
-💳 <b>Оплата подписки</b>
+💳 Оплата подписки
 
 Тариф: {plan['label']}
 Сумма: {plan['price']} ₽
 
 ⚠️ Тестовый режим
 """
-    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Тестовая активация", callback_data=f"test_{plan_id}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     
-    await callback.message.edit_text(
-        text,
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("test_"))
@@ -613,28 +568,21 @@ async def test_activate(callback: CallbackQuery):
         await callback.answer("❌ Ошибка")
         return
     
-    # Активируем
     create_subscription(user_id, plan_id, plan['price'], "test")
-    
     active_sub = get_active_subscription(user_id)
     vpn_key = active_sub.get('vpn_key') if active_sub else None
     
     text = f"""
-✅ <b>Подписка активирована!</b>
+✅ Подписка активирована!
 
 🎉 {plan['label']}
 📅 {plan['days']} дней
 🔌 Порт: {VPN_SERVER_PORT}
 
-🔑 <b>Ключ:</b>
+🔑 Ключ:
 <code>{vpn_key}</code>
 """
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_main_keyboard(),
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "my_profile")
@@ -644,29 +592,22 @@ async def show_profile(callback: CallbackQuery):
     active_sub = get_active_subscription(user_id)
     keys = get_user_vpn_keys(user_id)
     
-    text = f"""
-👤 <b>Профиль</b>
-
-🆔 ID: {user_id}
-📝 Имя: {user['first_name'] if user else '?'}
-"""
-
+    text = f"👤 Профиль\n\n🆔 ID: {user_id}"
+    if user:
+        text += f"\n📝 Имя: {user.get('first_name', '?')}"
+    
     if active_sub:
         try:
             end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
             days_left = (end_date - datetime.now()).days
             plan = PLANS.get(active_sub['plan_id'], {})
-            
-            text += f"""
-📱 <b>Подписка</b>
-• {plan.get('label', '?')}
-• До: {end_date.strftime('%d.%m.%Y')} ({days_left} дн.)
-• Порт: {active_sub.get('port', '?')}
-"""
+            text += f"\n\n📱 Подписка: {plan.get('label', '?')}"
+            text += f"\n📅 До: {end_date.strftime('%d.%m.%Y')} ({days_left} дн.)"
+            text += f"\n🔌 Порт: {active_sub.get('port', '?')}"
         except:
             pass
     else:
-        text += "\n❌ Нет подписки"
+        text += "\n\n❌ Нет подписки"
     
     text += f"\n🔑 Ключей: {len(keys)}"
     
@@ -676,17 +617,13 @@ async def show_profile(callback: CallbackQuery):
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     
-    await callback.message.edit_text(
-        text,
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "help")
 async def show_help(callback: CallbackQuery):
     text = """
-🆘 <b>Помощь</b>
+🆘 Помощь
 
 1. Нажмите "Купить подписку"
 2. Выберите тариф
@@ -694,16 +631,11 @@ async def show_help(callback: CallbackQuery):
 
 Ключ появится в "Мои ключи".
 """
-    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     
-    await callback.message.edit_text(
-        text,
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 # ======================= WEBHOOK =======================
@@ -742,8 +674,9 @@ async def main():
     await site.start()
     
     logger.info(f"🚀 Бот запущен на порту {port}")
-    logger.info(f"📡 Панель: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}")
+    logger.info(f"📡 Панель: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/clients")
     logger.info(f"📡 Inbound ID: {XRAY_INBOUND_ID}")
+    logger.info(f"📡 API: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/api/")
     
     try:
         await asyncio.Event().wait()
