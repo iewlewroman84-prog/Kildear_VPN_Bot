@@ -25,7 +25,7 @@ XRAY_PANEL_URL = os.environ.get("XRAY_PANEL_URL", "https://2.26.70.65:55347")
 XRAY_PANEL_PATH = os.environ.get("XRAY_PANEL_PATH", "/mMH522DscvfBbpFwaA")
 XRAY_USERNAME = os.environ.get("XRAY_USERNAME", "fHRTAk9lFz")
 XRAY_PASSWORD = os.environ.get("XRAY_PASSWORD", "pM0xjYSy4N")
-XRAY_INBOUND_ID = os.environ.get("XRAY_INBOUND_ID", "1")  # ID входящего подключения
+XRAY_INBOUND_ID = os.environ.get("XRAY_INBOUND_ID", "2")  # Используем ID 2 для подписки
 XRAY_API_TOKEN = os.environ.get("XRAY_API_TOKEN", "tlZpRhpGQA54Uyta9p9chp42oymKG8NjoauzprvEqHSHqrye")
 
 # Настройки подписки
@@ -123,7 +123,7 @@ def init_db():
 
 init_db()
 
-# ======================= ИНТЕГРАЦИЯ С 3X-UI =======================
+# ======================= ИНТЕГРАЦИЯ С 3X-UI ЧЕРЕЗ API =======================
 class XrayPanelAPI:
     def __init__(self, url: str, path: str, username: str, password: str, api_token: str = None):
         self.url = url.rstrip('/')
@@ -140,9 +140,9 @@ class XrayPanelAPI:
     def login(self) -> bool:
         """Авторизация в панели 3x-ui"""
         try:
-            # Пробуем логин через API
+            # Пробуем логин через API токен
             if self.api_token:
-                logger.info("Попытка входа через API токен")
+                logger.info("✅ Используем API токен для авторизации")
                 self.logged_in = True
                 return True
             
@@ -183,63 +183,19 @@ class XrayPanelAPI:
             logger.error(f"❌ Ошибка при авторизации: {e}")
             return False
     
-    def create_client(self, uuid: str, email: str, expiry_time: int, inbound_id: int = None) -> bool:
-        """Создание клиента в 3x-ui"""
+    def add_client(self, uuid: str, email: str, expiry_time: int, inbound_id: int = None) -> bool:
+        """
+        Добавление клиента через API панели
+        Используем endpoint: /panel/api/inbounds/addClient
+        """
         if not inbound_id:
             inbound_id = XRAY_INBOUND_ID
         
         try:
-            # Пробуем через API токен
-            if self.api_token:
-                add_client_url = f"{self.url}{self.path}/panel/api/inbounds/addClient"
-                headers = {
-                    "Authorization": f"Bearer {self.api_token}",
-                    "Content-Type": "application/json"
-                }
-                
-                client_data = {
-                    "id": uuid,
-                    "email": email,
-                    "flow": "xtls-rprx-vision",
-                    "limitIp": 1,
-                    "totalGB": 0,
-                    "expiryTime": expiry_time,
-                    "enable": True,
-                    "tgId": "",
-                    "subId": ""
-                }
-                
-                payload = {
-                    "clients": [client_data],
-                    "inboundId": int(inbound_id)
-                }
-                
-                logger.info(f"📤 Создание клиента через API: {email}")
-                
-                response = self.session.post(
-                    add_client_url,
-                    json=payload,
-                    headers=headers,
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get('success'):
-                        logger.info(f"✅ Клиент {email} создан через API")
-                        return True
-                    else:
-                        logger.error(f"❌ Ошибка API: {result}")
-                
-                logger.warning("⚠️ API метод не сработал, пробуем стандартный...")
+            # Используем API эндпоинт для добавления клиента
+            add_client_url = f"{self.url}{self.path}/panel/api/inbounds/addClient"
             
-            # Стандартный метод через куки
-            if not self.logged_in:
-                if not self.login():
-                    return False
-            
-            add_client_url = f"{self.url}{self.path}/xray/inbound/addClient/{inbound_id}"
-            
+            # Подготавливаем данные клиента
             client_data = {
                 "id": uuid,
                 "email": email,
@@ -253,30 +209,44 @@ class XrayPanelAPI:
             }
             
             payload = {
-                "clients": [client_data]
+                "clients": [client_data],
+                "inboundId": int(inbound_id)
             }
             
-            logger.info(f"📤 Создание клиента: {email}")
+            headers = {
+                "Authorization": f"Bearer {self.api_token}",
+                "Content-Type": "application/json"
+            }
+            
+            logger.info(f"📤 Создание клиента через API: {email}")
+            logger.info(f"📤 Inbound ID: {inbound_id}")
+            logger.info(f"📤 UUID: {uuid}")
+            logger.info(f"📤 Expiry: {expiry_time}")
             
             response = self.session.post(
                 add_client_url,
                 json=payload,
-                cookies=self.cookie,
+                headers=headers,
                 timeout=30
             )
+            
+            logger.info(f"📥 Статус ответа: {response.status_code}")
             
             if response.status_code == 200:
                 try:
                     result = response.json()
+                    logger.info(f"📥 Ответ API: {json.dumps(result, indent=2)}")
+                    
                     if result.get('success'):
-                        logger.info(f"✅ Клиент {email} создан в 3x-ui")
+                        logger.info(f"✅ Клиент {email} успешно создан!")
                         return True
                     else:
-                        logger.error(f"❌ Ошибка создания: {result}")
+                        error_msg = result.get('msg', 'Неизвестная ошибка')
+                        logger.error(f"❌ Ошибка создания клиента: {error_msg}")
                         return False
-                except:
-                    logger.info(f"✅ Клиент {email} создан (статус 200)")
-                    return True
+                except Exception as e:
+                    logger.error(f"❌ Ошибка парсинга ответа: {e}")
+                    return False
             else:
                 logger.error(f"❌ HTTP ошибка: {response.status_code} - {response.text}")
                 return False
@@ -285,35 +255,25 @@ class XrayPanelAPI:
             logger.error(f"❌ Ошибка при создании клиента: {e}")
             return False
     
-    def get_inbounds(self) -> Optional[list]:
-        """Получение списка входящих подключений"""
+    def get_clients(self, inbound_id: int = None) -> Optional[list]:
+        """Получение списка клиентов"""
+        if not inbound_id:
+            inbound_id = XRAY_INBOUND_ID
+        
         try:
-            if self.api_token:
-                url = f"{self.url}{self.path}/panel/api/inbounds/list"
-                headers = {"Authorization": f"Bearer {self.api_token}"}
-                response = self.session.get(url, headers=headers, timeout=30)
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get('success'):
-                        return result.get('obj', [])
+            url = f"{self.url}{self.path}/panel/api/inbounds/get/{inbound_id}"
+            headers = {"Authorization": f"Bearer {self.api_token}"}
             
-            if not self.logged_in:
-                if not self.login():
-                    return None
-            
-            url = f"{self.url}{self.path}/xray/inbound/list"
-            response = self.session.get(url, cookies=self.cookie, timeout=30)
+            response = self.session.get(url, headers=headers, timeout=30)
             
             if response.status_code == 200:
                 result = response.json()
                 if result.get('success'):
-                    return result.get('obj', [])
-            
+                    return result.get('obj', {}).get('clients', [])
             return None
                 
         except Exception as e:
-            logger.error(f"Ошибка получения inbounds: {e}")
+            logger.error(f"Ошибка получения клиентов: {e}")
             return None
 
 # Инициализируем API
@@ -327,14 +287,14 @@ try:
     )
     logger.info("API 3x-ui инициализирован")
     
-    # Проверяем подключение
-    inbounds = xray_api.get_inbounds()
-    if inbounds:
-        logger.info(f"✅ Найдено входящих подключений: {len(inbounds)}")
-        for inbound in inbounds:
-            logger.info(f"  - ID: {inbound.get('id')}, Порт: {inbound.get('port')}, Протокол: {inbound.get('protocol')}")
+    # Проверяем подключение и получаем список клиентов
+    clients = xray_api.get_clients()
+    if clients is not None:
+        logger.info(f"✅ Найдено клиентов: {len(clients)}")
+        for client in clients[:5]:  # Показываем первые 5
+            logger.info(f"  - {client.get('email')} | {client.get('id')}")
     else:
-        logger.warning("⚠️ Не удалось получить список inbounds")
+        logger.warning("⚠️ Не удалось получить список клиентов (возможно inbound пуст)")
         
 except Exception as e:
     logger.error(f"❌ Ошибка инициализации API: {e}")
@@ -363,21 +323,37 @@ def generate_vless_link(uuid: str, email: str, port: int) -> str:
     return vless_link
 
 def create_vpn_user_on_server(user_id: int, plan_id: str) -> tuple:
+    """Создание пользователя на 3x-ui через API"""
+    # Генерируем UUID
     user_uuid = str(uuid.uuid4())
+    
+    # Создаем email
     email = f"user_{user_id}_{int(datetime.now().timestamp())}"
+    
+    # Генерируем порт
     port = generate_random_port()
+    
+    # Получаем тариф
     plan = PLANS[plan_id]
+    
+    # Вычисляем время истечения (в миллисекундах)
     expiry_time = int((datetime.now() + timedelta(days=plan['days'])).timestamp() * 1000)
     
+    # Создаем клиента в 3x-ui через API
     client_created = False
     if xray_api:
-        client_created = xray_api.create_client(user_uuid, email, expiry_time, int(XRAY_INBOUND_ID))
+        client_created = xray_api.add_client(user_uuid, email, expiry_time, int(XRAY_INBOUND_ID))
         if client_created:
-            logger.info(f"✅ Клиент создан на панели: {email}, порт: {port}")
+            logger.info(f"✅ Клиент создан на панели: {email}")
+            logger.info(f"🔗 Ссылка на клиента: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/clients")
         else:
             logger.warning(f"⚠️ Не удалось создать клиента на панели")
+    else:
+        logger.warning("⚠️ API не инициализирован")
     
+    # Генерируем VLESS ссылку
     vless_link = generate_vless_link(user_uuid, email, port)
+    
     return vless_link, user_uuid, email, port
 
 # ======================= ФУНКЦИИ ДЛЯ ЮKASSA =======================
@@ -499,14 +475,19 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     start_date = datetime.now()
     end_date = start_date + timedelta(days=plan['days'])
     
+    # Создаем пользователя на сервере
     vpn_key, user_uuid, client_id, port = create_vpn_user_on_server(user_id, plan_id)
+    
+    # Генерируем UUID для подписки
     subscription_uuid = str(uuid.uuid4())
     
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
     
+    # Деактивируем старые подписки
     c.execute("UPDATE subscriptions SET status = 'inactive' WHERE user_id = ? AND status = 'active'", (user_id,))
     
+    # Создаем новую подписку
     c.execute("""INSERT INTO subscriptions 
                  (user_id, plan_id, start_date, end_date, status, price, payment_id, vpn_key, uuid, client_id, port, subscription_uuid)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -514,11 +495,13 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     
     subscription_id = c.lastrowid
     
+    # Сохраняем ключ
     c.execute("""INSERT INTO vpn_keys 
                  (key, user_id, subscription_id, created_at, expires_at, status, devices, uuid, client_id, port, subscription_uuid)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
               (vpn_key, user_id, subscription_id, start_date, end_date, 'active', plan['devices'], user_uuid, client_id, port, subscription_uuid))
     
+    # Обновляем пользователя
     c.execute("""UPDATE users 
                  SET current_subscription = ?, subscription_end = ?, devices = ?, subscription_uuid = ?
                  WHERE user_id = ?""",
@@ -1131,6 +1114,7 @@ async def main():
     
     logger.info(f"✅ Бот запущен на порту {port}")
     logger.info(f"✅ 3x-ui панель: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}")
+    logger.info(f"✅ Клиенты: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/clients")
     logger.info(f"✅ Подписка: {SUBSCRIPTION_URL}")
     logger.info(f"✅ ЮKassa подключена")
     
