@@ -126,13 +126,29 @@ class XrayAPI:
     def __init__(self):
         self.session = requests.Session()
         self.session.verify = False
-        self.base_url = f"{XRAY_PANEL_URL}{XRAY_PANEL_PATH}"
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        })
+        # webBasePath в 3x-ui обязательно должен оканчиваться "/",
+        # иначе панель отдаёт 403 на несовпадающий путь.
+        path = XRAY_PANEL_PATH if XRAY_PANEL_PATH.endswith("/") else XRAY_PANEL_PATH + "/"
+        self.base_url = f"{XRAY_PANEL_URL}{path}".rstrip("/")
+        self.panel_root = f"{XRAY_PANEL_URL}{path}"
         self.logged_in = False
         self.login()
 
     def login(self) -> bool:
         """Авторизация через логин/пароль"""
         try:
+            # 1) Сначала обычный GET на корень секретного пути — панель
+            #    выставляет сессионную cookie и только после этого
+            #    принимает POST на /login. Без этого шага /login отдаёт 403.
+            logger.info(f"📤 Прогрев сессии: {self.panel_root}")
+            priming = self.session.get(self.panel_root, timeout=30)
+            logger.info(f"📥 Статус прогрева: {priming.status_code}")
+
+            # 2) Логин
             url = f"{self.base_url}/login"
             data = {
                 "username": XRAY_USERNAME,
@@ -140,7 +156,10 @@ class XrayAPI:
             }
 
             logger.info(f"📤 Авторизация: {url}")
-            response = self.session.post(url, data=data, timeout=30)
+            response = self.session.post(
+                url, data=data, timeout=30,
+                headers={"Referer": self.panel_root}
+            )
 
             logger.info(f"📥 Статус: {response.status_code}")
 
@@ -158,6 +177,15 @@ class XrayAPI:
                         self.logged_in = True
                         logger.info("✅ Авторизация успешна (по кукам)!")
                         return True
+
+            # 3) Некоторые сборки 3x-ui с "секретным путём" авторизуют по
+            #    самому факту знания пути и выдают сессионную cookie уже на
+            #    шаге прогрева (без формы логина). Если прогрев дал 200 и
+            #    сессия получила cookie — считаем это валидной сессией.
+            if priming.status_code == 200 and self.session.cookies:
+                self.logged_in = True
+                logger.warning("⚠️ /login не подтвердил явно, но сессия по пути установлена — продолжаю с ней")
+                return True
 
             logger.error("❌ Ошибка авторизации")
             self.logged_in = False
