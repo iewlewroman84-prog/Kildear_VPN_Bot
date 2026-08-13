@@ -22,26 +22,26 @@ from aiogram.client.default import DefaultBotProperties
 import aiohttp
 from flask import Flask, request
 
-# ======================= НАСТРОЙКИ =======================
-BOT_TOKEN = "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo"
+# ======================= НАСТРОЙКИ (из переменных окружения) =======================
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
 
 PANEL_URL = "https://my.xorek.cloud:2053"
-PANEL_USERNAME = "ВАШ_ЛОГИН"
-PANEL_PASSWORD = "ВАШ_ПАРОЛЬ"
+PANEL_USERNAME = os.environ.get("PANEL_USERNAME", "ВАШ_ЛОГИН")
+PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "ВАШ_ПАРОЛЬ")
 
-FREEKASSA_MERCHANT_ID = "ВАШ_MERCHANT_ID"
-FREEKASSA_API_KEY = "ВАШ_API_КЛЮЧ"
-FREEKASSA_SECRET_WORD_1 = "Зимушка"
-FREEKASSA_SECRET_WORD_2 = "Декабрь"
+FREEKASSA_MERCHANT_ID = os.environ.get("FREEKASSA_MERCHANT_ID", "75393")
+FREEKASSA_API_KEY = os.environ.get("FREEKASSA_API_KEY", "a482e9901b68ea8fa3a30e16b044f80c")
+FREEKASSA_SECRET_WORD_1 = os.environ.get("FREEKASSA_SECRET_WORD_1", "Зимушка")
+FREEKASSA_SECRET_WORD_2 = os.environ.get("FREEKASSA_SECRET_WORD_2", "Декабрь")
 FREEKASSA_API_URL = "https://api.freekassa.ru/v1/orders/create"
-WEBHOOK_URL = "https://ВАШ_САЙТ_НА_RENDER.com/webhook/freekassa"
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://kildear-vpn-bot.onrender.com/webhook/freekassa")
 
 # ======================= ТАРИФЫ =======================
 PLANS = {
-    "2d": {"days": 2, "price": 0, "devices": 1, "label": "2 дня (тестовый бесплатно)"},
-    "1m": {"days": 30, "price": 139, "devices": 2, "label": "1 месяц"},
-    "3m": {"days": 90, "price": 469, "devices": 3, "label": "3 месяца"},
-    "1y": {"days": 365, "price": 899, "devices": 5, "label": "1 год"},
+    "2d": {"days": 2, "price": 0, "devices": 1, "label": "🎁 2 дня бесплатно", "emoji": "🎁"},
+    "1m": {"days": 30, "price": 139, "devices": 2, "label": "1 месяц", "emoji": "🔥"},
+    "3m": {"days": 90, "price": 469, "devices": 3, "label": "3 месяца", "emoji": "⭐"},
+    "1y": {"days": 365, "price": 899, "devices": 5, "label": "1 год", "emoji": "💎"},
 }
 
 # ======================= ИНИЦИАЛИЗАЦИЯ =======================
@@ -54,11 +54,38 @@ dp = Dispatcher(storage=storage)
 
 user_orders = {}
 
-
 # ======================= СОСТОЯНИЯ FSM =======================
 class OrderState(StatesGroup):
     waiting_for_payment = State()
 
+# ======================= КЛАВИАТУРА С ТАРИФАМИ =======================
+def get_plans_keyboard():
+    """Создаёт клавиатуру с кнопками тарифов"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=f"{PLANS['2d']['emoji']} {PLANS['2d']['label']}",
+                callback_data="plan_2d"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{PLANS['1m']['emoji']} {PLANS['1m']['label']} — {PLANS['1m']['price']} ₽",
+                callback_data="plan_1m"
+            ),
+            InlineKeyboardButton(
+                text=f"{PLANS['3m']['emoji']} {PLANS['3m']['label']} — {PLANS['3m']['price']} ₽",
+                callback_data="plan_3m"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{PLANS['1y']['emoji']} {PLANS['1y']['label']} — {PLANS['1y']['price']} ₽",
+                callback_data="plan_1y"
+            )
+        ]
+    ])
+    return keyboard
 
 # ======================= ФУНКЦИИ ДЛЯ РАБОТЫ С ПАНЕЛЬЮ =======================
 async def get_panel_session():
@@ -76,16 +103,15 @@ async def get_panel_session():
             logging.error(f"Ошибка соединения: {e}")
             return None
 
-
 async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
     session = await get_panel_session()
     if not session:
         return None
-
+    
     username = f"user_{telegram_id}_{int(datetime.now().timestamp())}"
     expiry_date = datetime.now() + timedelta(days=days)
     expiry_timestamp = int(expiry_date.timestamp())
-
+    
     client_data = {
         "id": telegram_id,
         "flow": "",
@@ -99,9 +125,9 @@ async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
             "clients": [{"id": username, "flow": "xtls-rprx-vision"}]
         })
     }
-
+    
     add_client_url = f"{PANEL_URL}/panel/api/inbounds/addClient"
-
+    
     try:
         async with session.post(add_client_url, json=client_data, ssl=False) as resp:
             if resp.status == 200:
@@ -113,7 +139,6 @@ async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
     except Exception as e:
         logging.error(f"Ошибка запроса к API: {e}")
         return None
-
 
 # ======================= ФУНКЦИИ ДЛЯ РАБОТЫ С FREEKASSA =======================
 async def create_freekassa_invoice(amount: float, description: str, order_id: str) -> tuple:
@@ -128,12 +153,12 @@ async def create_freekassa_invoice(amount: float, description: str, order_id: st
         "fail_url": "https://t.me/kildear_vpn_bot",
         "webhook_url": WEBHOOK_URL
     }
-
+    
     headers = {
         "Authorization": f"Bearer {FREEKASSA_API_KEY}",
         "Content-Type": "application/json"
     }
-
+    
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(FREEKASSA_API_URL, json=payload, headers=headers) as resp:
@@ -148,7 +173,6 @@ async def create_freekassa_invoice(amount: float, description: str, order_id: st
             logging.error(f"Ошибка соединения с FREEKASSA: {e}")
             return None, None
 
-
 def verify_freekassa_signature(data, signature):
     if not signature:
         return False
@@ -156,57 +180,43 @@ def verify_freekassa_signature(data, signature):
     expected = hashlib.sha256(check_string.encode()).hexdigest()
     return hmac.compare_digest(expected, signature)
 
-
 # ======================= ОБРАБОТЧИКИ КОМАНД =======================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
         "🛡️ <b>Добро пожаловать в Kildear VPN!</b>\n\n"
         "Я помогу вам приобрести надёжный VPN-доступ.\n\n"
-        "🎁 <b>Попробуйте бесплатно!</b>\n"
-        "/buy_2d — 2 дня <b>бесплатно</b>, 1 устройство\n\n"
-        "📌 <b>Платные тарифы:</b>\n"
-        "/buy_1m — 1 месяц, 139 ₽, 2 устройства 🔥\n"
-        "/buy_3m — 3 месяца, 469 ₽, 3 устройства\n"
-        "/buy_1y — 1 год, 899 ₽, 5 устройств\n\n"
-        "Просто выберите тариф и следуйте инструкциям.",
+        "👇 <b>Выберите тариф:</b>",
+        reply_markup=get_plans_keyboard(),
         parse_mode="HTML"
     )
 
-
-@dp.message(Command("buy_2d"))
-async def buy_2d(message: Message, state: FSMContext):
-    await start_order(message, state, "2d")
-
-
-@dp.message(Command("buy_1m"))
-async def buy_1m(message: Message, state: FSMContext):
-    await start_order(message, state, "1m")
-
-
-@dp.message(Command("buy_3m"))
-async def buy_3m(message: Message, state: FSMContext):
-    await start_order(message, state, "3m")
-
-
-@dp.message(Command("buy_1y"))
-async def buy_1y(message: Message, state: FSMContext):
-    await start_order(message, state, "1y")
-
-
-async def start_order(message: Message, state: FSMContext, plan_key: str):
+# ======================= ОБРАБОТЧИКИ КНОПОК (Callback) =======================
+@dp.callback_query(F.data.startswith("plan_"))
+async def process_plan_selection(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    plan_key = callback.data.replace("plan_", "")
+    if plan_key not in PLANS:
+        await callback.message.answer("❌ Такого тарифа не существует.")
+        return
+    
     plan = PLANS[plan_key]
-    user_id = message.from_user.id
+    user_id = callback.from_user.id
     order_id = f"{user_id}_{int(datetime.now().timestamp())}"
-
+    
+    # БЕСПЛАТНЫЙ ТАРИФ
     if plan["price"] == 0:
-        await message.answer(
-            f"🎁 <b>Тестовый доступ на 2 дня!</b>\n\nСоздаю ваш бесплатный VPN-ключ...",
+        await callback.message.answer(
+            f"🎁 <b>Тестовый доступ на 2 дня!</b>\n\n"
+            f"Создаю ваш бесплатный VPN-ключ...",
             parse_mode="HTML"
         )
+        
         vpn_link = await create_vpn_user(user_id, plan["days"])
+        
         if vpn_link:
-            await message.answer(
+            await callback.message.answer(
                 f"✅ <b>VPN-ключ готов!</b>\n\n"
                 f"🔗 <b>Ссылка для подключения:</b>\n"
                 f"<code>{vpn_link}</code>\n\n"
@@ -215,25 +225,35 @@ async def start_order(message: Message, state: FSMContext, plan_key: str):
                 f"2. Скопируйте ссылку и вставьте в приложение\n"
                 f"3. Наслаждайтесь безопасным интернетом!\n\n"
                 f"📅 Подписка активна до: {(datetime.now() + timedelta(days=plan['days'])).strftime('%d.%m.%Y')}\n\n"
-                f"💡 После теста выберите платный тариф: /buy_1m",
+                f"💡 После теста выберите платный тариф 👇",
+                reply_markup=get_plans_keyboard(),
                 parse_mode="HTML"
             )
         else:
-            await message.answer(
+            await callback.message.answer(
                 "❌ Не удалось создать VPN-ключ. Попробуйте позже или обратитесь к администратору."
             )
         return
-
+    
+    # ПЛАТНЫЙ ТАРИФ
+    await callback.message.answer(
+        f"⏳ Создаю счёт для оплаты...\n"
+        f"Тариф: {plan['label']}\n"
+        f"Стоимость: {plan['price']} ₽\n"
+        f"Устройств: {plan['devices']}",
+        parse_mode="HTML"
+    )
+    
     payment_url, invoice_id = await create_freekassa_invoice(
         amount=plan["price"],
         description=f"Kildear VPN — {plan['label']}",
         order_id=order_id
     )
-
+    
     if not payment_url:
-        await message.answer("❌ Ошибка при создании счёта. Попробуйте позже.")
+        await callback.message.answer("❌ Ошибка при создании счёта. Попробуйте позже.")
         return
-
+    
     user_orders[user_id] = {
         "invoice_id": invoice_id,
         "order_id": order_id,
@@ -243,16 +263,16 @@ async def start_order(message: Message, state: FSMContext, plan_key: str):
         "devices": plan["devices"],
         "status": "pending"
     }
-
+    
     await state.set_state(OrderState.waiting_for_payment)
-
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Оплатить через FREEKASSA", url=payment_url)],
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_payment")],
         [InlineKeyboardButton(text="❌ Отменить заказ", callback_data="cancel_order")]
     ])
-
-    await message.answer(
+    
+    await callback.message.answer(
         f"💳 <b>Оформление заказа</b>\n\n"
         f"Тариф: {plan['label']}\n"
         f"Стоимость: {plan['price']} ₽\n"
@@ -263,28 +283,26 @@ async def start_order(message: Message, state: FSMContext, plan_key: str):
         parse_mode="HTML"
     )
 
-
-# ======================= ОБРАБОТЧИКИ КНОПОК =======================
+# ======================= ОБРАБОТЧИКИ КНОПОК (Check/Cancel) =======================
 @dp.callback_query(F.data == "check_payment")
 async def check_payment(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     user_id = callback.from_user.id
-
+    
     if user_id not in user_orders:
-        await callback.message.answer("❌ Сначала выберите тариф через /buy_...")
+        await callback.message.answer("❌ Сначала выберите тариф через /start")
         return
-
+    
     order = user_orders[user_id]
     if order["status"] == "paid":
         await callback.message.answer("✅ Этот заказ уже оплачен!")
         return
-
-    # Здесь проверка статуса платежа через FREEKASSA
+    
+    # Здесь проверка статуса платежа через API FREEKASSA
     await callback.message.answer(
         "⏳ Проверка платежа...\n"
         "Если вы уже оплатили, подождите 1-2 минуты и нажмите «Проверить оплату» снова."
     )
-
 
 @dp.callback_query(F.data == "cancel_order")
 async def cancel_order(callback: CallbackQuery, state: FSMContext):
@@ -293,44 +311,42 @@ async def cancel_order(callback: CallbackQuery, state: FSMContext):
         del user_orders[user_id]
     await state.clear()
     await callback.answer("Заказ отменён")
-    await callback.message.edit_text("❌ Заказ отменён. Если передумаете, выберите тариф заново.")
-
+    await callback.message.edit_text("❌ Заказ отменён. Если передумаете, выберите тариф заново.", reply_markup=get_plans_keyboard())
 
 # ======================= ВЕБХУК ДЛЯ FREEKASSA (FLASK) =======================
 app = Flask(__name__)
-
 
 @app.route('/webhook/freekassa', methods=['POST'])
 def freekassa_webhook():
     data = request.json
     signature = request.headers.get('X-Freekassa-Signature')
-
+    
     if not verify_freekassa_signature(data, signature):
         logging.warning("Неверная подпись вебхука")
         return "Invalid signature", 400
-
+    
     if data.get("status") == "paid":
         order_id = data.get("order_id")
         if not order_id:
             return "No order_id", 400
-
+        
         try:
             user_id = int(order_id.split('_')[0])
         except (ValueError, IndexError):
             return "Invalid order_id", 400
-
+        
         if user_id not in user_orders:
             logging.warning(f"Заказ для user_id {user_id} не найден")
             return "Order not found", 404
-
+        
         order = user_orders[user_id]
         if order["status"] == "paid":
             return "Already paid", 200
-
+        
         order["status"] = "paid"
-
+        
         vpn_link = asyncio.run(create_vpn_user(user_id, order["days"]))
-
+        
         if vpn_link:
             asyncio.run(bot.send_message(
                 chat_id=user_id,
@@ -345,30 +361,26 @@ def freekassa_webhook():
                 chat_id=user_id,
                 text="❌ Оплата прошла, но не удалось создать VPN-ключ. Обратитесь к администратору."
             ))
-
+        
         del user_orders[user_id]
         return "OK", 200
-
+    
     return "OK", 200
-
 
 @app.route('/', methods=['GET'])
 def index():
     return "Бот Kildear VPN работает!"
 
-
 # ======================= ЗАПУСК =======================
 async def main():
     await dp.start_polling(bot)
 
-
 if __name__ == "__main__":
     import threading
-
     flask_thread = threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
     )
     flask_thread.daemon = True
     flask_thread.start()
-
+    
     asyncio.run(main())
