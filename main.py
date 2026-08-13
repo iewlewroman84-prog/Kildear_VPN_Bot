@@ -14,6 +14,7 @@ import hashlib
 import secrets
 import string
 import json
+from aiohttp import web
 
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
@@ -23,9 +24,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgm
 # YKASSA_SECRET_KEY = os.environ.get("YKASSA_SECRET_KEY", "live_fH2K3m3SygBdP8P6bjaOwkRj4UKl5FwsatLZC-PJKt8")
 # YKASSA_API_URL = "https://api.yookassa.ru/v3/payments"
 # YKASSA_WEBHOOK_URL = os.environ.get("YKASSA_WEBHOOK_URL", "https://kildear-vpn-bot.onrender.com/webhook/yookassa")
-
-# Режим работы бота - ТОЛЬКО POLLING
-USE_WEBHOOK = False
 
 # Настройки VPN ключей
 VPN_KEY_LENGTH = 32
@@ -438,7 +436,7 @@ async def process_plan_selection(callback: CallbackQuery):
         await callback.answer()
         return
     
-    # Для платных тарифов - показываем заглушку
+    # Для платных тарифов
     payment_text = f"""
 💳 <b>Оплата подписки</b>
 
@@ -446,9 +444,7 @@ async def process_plan_selection(callback: CallbackQuery):
 Сумма: {plan['price']} ₽
 Период: {plan['days']} дней
 
-⚠️ <b>ВНИМАНИЕ:</b> Для тестирования оплата отключена.
-
-Для активации подписки в тестовом режиме нажмите кнопку "Тестовая активация".
+⚠️ <b>Для тестирования используйте кнопку ниже</b>
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -598,10 +594,58 @@ async def show_help(callback: CallbackQuery):
     )
     await callback.answer()
 
+# ======================= WEBHOOK ОБРАБОТЧИКИ =======================
+async def webhook_handler(request):
+    """Обработка вебхуков от Telegram"""
+    try:
+        data = await request.json()
+        update = types.Update(**data)
+        await dp.feed_update(bot, update)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"Ошибка в вебхуке: {e}")
+        return web.Response(status=500)
+
 # ======================= ЗАПУСК БОТА =======================
+async def on_startup():
+    """Настройка вебхука при запуске"""
+    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'kildear-vpn-bot.onrender.com')}/webhook"
+    
+    try:
+        # Удаляем старые вебхуки и отключаем polling
+        await bot.delete_webhook(drop_pending_updates=True)
+        # Устанавливаем новый вебхук
+        await bot.set_webhook(webhook_url)
+        logger.info(f"Вебхук установлен: {webhook_url}")
+    except Exception as e:
+        logger.error(f"Ошибка установки вебхука: {e}")
+
 async def main():
-    logger.info("Запуск бота...")
-    await dp.start_polling(bot)
+    # Получаем порт из переменной окружения
+    port = int(os.environ.get('PORT', 8080))
+    
+    # Создаем веб-приложение
+    app = web.Application()
+    app.router.add_post('/webhook', webhook_handler)
+    app.router.add_get('/', lambda request: web.Response(text='Bot is running!'))
+    
+    # Настройка вебхука
+    await on_startup()
+    
+    # Запускаем веб-сервер
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    logger.info(f"Бот запущен на порту {port}")
+    logger.info(f"Вебхук: https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost')}/webhook")
+    
+    # Держим сервер запущенным
+    try:
+        await asyncio.Event().wait()
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен")
 
 if __name__ == "__main__":
     asyncio.run(main())
