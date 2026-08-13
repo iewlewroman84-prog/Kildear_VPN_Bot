@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 from datetime import datetime
-from flask import Flask
 
 os.environ["TELEGRAM_BOT_API_URL"] = "https://telegram.dog/bot"
 
