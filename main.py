@@ -131,21 +131,21 @@ def get_referral_keyboard(ref_code: str):
 
 # ======================= СОЗДАНИЕ КЛИЕНТА ЧЕРЕЗ SQLITE WEB API =======================
 async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
-    """Создаёт VPN-ключ через HTTP-API SQLite Web"""
+    """Создаёт VPN-ключ через SQLite Web API"""
     username = f"user_{telegram_id}_{int(datetime.now().timestamp())}"
     expiry_date = datetime.now() + timedelta(days=days)
     expiry_timestamp = int(expiry_date.timestamp() * 1000)
 
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Получаем первый активный Inbound через API таблицы
-            async with session.get(f"{DB_URL}/api/table/inbounds") as resp:
+            # 1. Получаем первый активный Inbound через правильный URL
+            async with session.get(f"{DB_URL}/inbounds/") as resp:
                 if resp.status != 200:
                     logging.error(f"Ошибка получения Inbound: {resp.status}")
                     return None
                 data = await resp.json()
                 
-                # SQLite Web возвращает список объектов в поле "rows"
+                # SQLite Web возвращает список объектов
                 rows = data.get("rows", [])
                 if not rows:
                     logging.error("Нет активных Inbound в базе")
@@ -153,9 +153,8 @@ async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
                 
                 # Берём первый Inbound
                 inbound = rows[0]
-                # Поля: id, ... settings
-                inbound_id = inbound[0]
-                settings = json.loads(inbound[1])  # settings - второе поле
+                inbound_id = inbound[0]  # id
+                settings = json.loads(inbound[11])  # settings - 12-е поле (индекс 11)
                 
                 if "clients" not in settings:
                     settings["clients"] = []
@@ -176,13 +175,13 @@ async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
                 
                 settings["clients"].append(new_client)
                 
-                # 2. Обновляем Inbound через API таблицы
+                # 2. Обновляем Inbound через API
                 update_data = {
                     "settings": json.dumps(settings)
                 }
                 
                 async with session.post(
-                    f"{DB_URL}/api/table/inbounds/{inbound_id}",
+                    f"{DB_URL}/inbounds/{inbound_id}",
                     json=update_data
                 ) as resp:
                     if resp.status == 200:
