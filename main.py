@@ -21,9 +21,8 @@ from aiogram.client.default import DefaultBotProperties
 
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
-PANEL_URL = "https://2.26.70.65:55347/mMH522DscvfBbpFwaA"
-API_TOKEN = "Mmqbc6A4SZweWxXOMIRl92znDOmyk6UV"
 SERVER_IP = "2.26.70.65"
+INBOUND_ID = 2
 PORT = 40224
 
 YKASSA_SHOP_ID = os.environ.get("YKASSA_SHOP_ID", "1434221")
@@ -128,82 +127,34 @@ def get_referral_keyboard(ref_code: str):
     ])
     return keyboard
 
-# ======================= СОЗДАНИЕ VPN-КЛЮЧА ЧЕРЕЗ API 3X-UI =======================
+# ======================= СОЗДАНИЕ VPN-КЛЮЧА ЧЕРЕЗ СКРИПТ =======================
 async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
-    """Создаёт VPN-ключ через официальный API 3x-ui"""
+    """Создаёт VPN-ключ через bash-скрипт на сервере"""
     try:
-        client_uuid = str(uuid.uuid4())
-        username = f"user_{telegram_id}_{int(datetime.now().timestamp())}"
-        expiry_date = datetime.now() + timedelta(days=days)
-        expiry_timestamp = int(expiry_date.timestamp() * 1000)
-
-        logging.info(f"📌 НОВАЯ ПОДПИСКА")
-        logging.info(f"📱 Telegram ID: {telegram_id}")
-        logging.info(f"📅 Дней: {days}")
-        logging.info(f"👤 Имя: {username}")
-        logging.info(f"🔑 UUID: {client_uuid}")
-
-        # Пробуем добавить клиента через API
-        client_data = {
-            "email": username,
-            "limitIp": 5,
-            "totalGB": 0,
-            "expiryTime": expiry_timestamp,
-            "enable": True,
-            "inbounds": [2]
-        }
-
-        headers = {
-            "Authorization": f"Bearer {API_TOKEN}",
-            "Content-Type": "application/json"
-        }
-
-        async with aiohttp.ClientSession() as session:
-            # Сначала проверим, какие inbounds вообще есть
-            async with session.get(
-                f"{PANEL_URL}/panel/api/inbounds/list",
-                headers=headers,
-                ssl=False
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    logging.info(f"✅ Inbound list: {data}")
-                else:
-                    logging.error(f"❌ Не могу получить список Inbound: {resp.status}")
-
-            # Теперь создаём клиента
-            async with session.post(
-                f"{PANEL_URL}/panel/api/inbounds/addClient",
-                json=client_data,
-                headers=headers,
-                ssl=False
-            ) as resp:
-                response_text = await resp.text()
-                logging.info(f"Ответ API: {response_text}")
-                
-                if resp.status == 200:
-                    try:
-                        data = json.loads(response_text)
-                        if data.get("success"):
-                            vless_link = f"vless://{client_uuid}@{SERVER_IP}:{PORT}?type=ws&encryption=none&path=%2Fvpn&host=&security=none#{username}"
-                            return vless_link
-                        else:
-                            logging.error(f"Ошибка API: {data}")
-                            return None
-                    except json.JSONDecodeError:
-                        logging.error(f"Невалидный JSON: {response_text}")
-                        return None
-                else:
-                    logging.error(f"HTTP ошибка: {resp.status} - {response_text}")
-                    return None
-
+        # Вызываем скрипт через SSH (локально)
+        import subprocess
+        result = subprocess.run(
+            ["/root/add_client.sh", str(telegram_id), str(days)],
+            capture_output=True,
+            text=True
+        )
+        
+        # Ищем ссылку в выводе
+        for line in result.stdout.split("\n"):
+            if line.startswith("🔗 Ссылка:"):
+                link = line.replace("🔗 Ссылка:", "").strip()
+                logging.info(f"✅ Ссылка: {link}")
+                return link
+        
+        logging.error(f"Ошибка: {result.stderr}")
+        return None
+        
     except Exception as e:
         logging.error(f"Ошибка создания клиента: {e}")
         return None
 
 # ======================= ОСТАЛЬНОЙ КОД =======================
 # (вся остальная часть кода остаётся без изменений)
-# Команды, клавиатуры, ЮKassa, рефералка — всё то же самое
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
