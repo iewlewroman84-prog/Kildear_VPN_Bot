@@ -14,7 +14,6 @@ import uuid
 import requests
 import urllib3
 from aiohttp import web
-import re
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -115,25 +114,53 @@ class XrayAPI:
         self.login()
 
     def login(self) -> bool:
-        """Авторизация в панели 3x-ui"""
+        """Авторизация через GET параметры (старый способ)"""
         try:
-            # ШАГ 1: GET на корень
-            logger.info(f"📤 GET на корень: {self.panel_root}")
-            response = self.session.get(self.panel_root, timeout=30)
+            # Пробуем авторизацию через GET параметры
+            url = f"{self.panel_root}?username={XRAY_USERNAME}&password={XRAY_PASSWORD}"
+            logger.info(f"📤 GET авторизация: {url}")
+            
+            response = self.session.get(url, timeout=30)
             logger.info(f"📥 GET статус: {response.status_code}")
             
-            # ШАГ 2: POST с form-data
+            if response.status_code == 200:
+                # Проверяем куки
+                if self.session.cookies:
+                    self.logged_in = True
+                    logger.info("✅ Авторизация через GET успешна!")
+                    logger.info(f"🍪 Cookies: {self.session.cookies.get_dict()}")
+                    return True
+            
+            # Если GET не сработал, пробуем через POST
+            logger.info("🔄 Пробуем POST с Basic Auth...")
+            return self.login_basic()
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка авторизации GET: {e}")
+            return False
+    
+    def login_basic(self) -> bool:
+        """Авторизация через Basic Auth"""
+        try:
             url = f"{self.base_url}/login"
+            
+            # Добавляем Basic Auth заголовок
+            import base64
+            auth_str = f"{XRAY_USERNAME}:{XRAY_PASSWORD}"
+            auth_bytes = auth_str.encode('ascii')
+            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+            
+            headers = {
+                "Authorization": f"Basic {auth_b64}",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            
             data = {
                 "username": XRAY_USERNAME,
                 "password": XRAY_PASSWORD
             }
-            headers = {
-                "Referer": self.panel_root,
-                "Content-Type": "application/x-www-form-urlencoded"
-            }
             
-            logger.info(f"📤 POST на /login с данными: username={XRAY_USERNAME}")
+            logger.info("📤 POST с Basic Auth")
             response = self.session.post(url, data=data, headers=headers, timeout=30)
             
             logger.info(f"📥 POST статус: {response.status_code}")
@@ -142,38 +169,42 @@ class XrayAPI:
             if response.status_code == 200:
                 try:
                     result = response.json()
-                    logger.info(f"📥 JSON ответ: {result}")
                     if result.get('success'):
                         self.logged_in = True
-                        logger.info("✅ Авторизация успешна!")
+                        logger.info("✅ Авторизация через Basic Auth успешна!")
                         return True
                 except:
                     pass
-                
-                # Проверяем куки
-                if self.session.cookies:
-                    self.logged_in = True
-                    logger.info("✅ Авторизация по кукам успешна!")
-                    return True
             
-            # Если не получилось - пробуем без form-data, через json
-            logger.info("🔄 Пробуем через JSON...")
-            response = self.session.post(url, json=data, timeout=30)
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    if result.get('success'):
-                        self.logged_in = True
-                        logger.info("✅ Авторизация через JSON успешна!")
-                        return True
-                except:
-                    pass
+            # Если ничего не помогло, пробуем через куки из браузера
+            logger.info("🔄 Пробуем через cookies...")
+            return self.login_cookie()
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка Basic Auth: {e}")
+            return False
+    
+    def login_cookie(self) -> bool:
+        """Авторизация через cookies (сессия из браузера)"""
+        try:
+            # Здесь мы просто проверяем, есть ли уже куки
+            if self.session.cookies:
+                self.logged_in = True
+                logger.info("✅ Авторизация по существующим кукам!")
+                return True
+            
+            # Пробуем получить куки через GET на корень
+            response = self.session.get(self.panel_root, timeout=30)
+            if response.status_code == 200 and self.session.cookies:
+                self.logged_in = True
+                logger.info("✅ Авторизация по кукам после GET!")
+                return True
             
             logger.error("❌ Все способы авторизации не сработали")
             return False
             
         except Exception as e:
-            logger.error(f"❌ Ошибка авторизации: {e}")
+            logger.error(f"❌ Ошибка cookie авторизации: {e}")
             return False
 
     def add_client(self, client_uuid: str, email: str, expiry_time: int, sub_id: str) -> bool:
