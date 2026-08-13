@@ -11,8 +11,6 @@ from aiogram import F
 import aiohttp
 import base64
 import hashlib
-import secrets
-import string
 import json
 import uuid
 import requests
@@ -22,12 +20,13 @@ from aiohttp import web
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
 
-# Настройки 3x-ui панели
+# Настройки 3x-ui панели (из ваших данных)
 XRAY_PANEL_URL = os.environ.get("XRAY_PANEL_URL", "https://2.26.70.65:55347")
 XRAY_PANEL_PATH = os.environ.get("XRAY_PANEL_PATH", "/mMH522DscvfBbpFwaA")
-XRAY_USERNAME = os.environ.get("XRAY_USERNAME", "admin")
-XRAY_PASSWORD = os.environ.get("XRAY_PASSWORD", "admin")
-XRAY_INBOUND_ID = os.environ.get("XRAY_INBOUND_ID", "1")
+XRAY_USERNAME = os.environ.get("XRAY_USERNAME", "fHRTAk9lFz")
+XRAY_PASSWORD = os.environ.get("XRAY_PASSWORD", "pM0xjYSy4N")
+XRAY_INBOUND_ID = os.environ.get("XRAY_INBOUND_ID", "1")  # ID входящего подключения
+XRAY_API_TOKEN = os.environ.get("XRAY_API_TOKEN", "tlZpRhpGQA54Uyta9p9chp42oymKG8NjoauzprvEqHSHqrye")
 
 # Настройки подписки
 SUBSCRIPTION_PATH = os.environ.get("SUBSCRIPTION_PATH", "/sub/mc3psfn9f3t39r2x")
@@ -126,50 +125,121 @@ init_db()
 
 # ======================= ИНТЕГРАЦИЯ С 3X-UI =======================
 class XrayPanelAPI:
-    def __init__(self, url: str, path: str, username: str, password: str):
+    def __init__(self, url: str, path: str, username: str, password: str, api_token: str = None):
         self.url = url.rstrip('/')
         self.path = path.rstrip('/')
         self.username = username
         self.password = password
+        self.api_token = api_token
         self.session = requests.Session()
         self.session.verify = False
         self.cookie = None
+        self.logged_in = False
         self.login()
     
     def login(self) -> bool:
+        """Авторизация в панели 3x-ui"""
         try:
+            # Пробуем логин через API
+            if self.api_token:
+                logger.info("Попытка входа через API токен")
+                self.logged_in = True
+                return True
+            
+            # Стандартный логин
+            login_url = f"{self.url}{self.path}/login"
             login_data = {
                 "username": self.username,
                 "password": self.password
             }
             
+            logger.info(f"Попытка входа в 3x-ui: {login_url}")
+            
             response = self.session.post(
-                f"{self.url}{self.path}/login",
+                login_url,
                 json=login_data,
                 timeout=30
             )
             
             if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    self.cookie = response.cookies.get_dict()
-                    logger.info("✅ Успешная авторизация в 3x-ui")
-                    return True
-                else:
-                    logger.error(f"❌ Ошибка авторизации: {result}")
-                    return False
-            else:
-                logger.error(f"❌ HTTP ошибка: {response.status_code}")
-                return False
+                try:
+                    result = response.json()
+                    if result.get('success'):
+                        self.cookie = response.cookies.get_dict()
+                        self.logged_in = True
+                        logger.info("✅ Успешная авторизация в 3x-ui")
+                        return True
+                except:
+                    if response.cookies:
+                        self.cookie = response.cookies.get_dict()
+                        self.logged_in = True
+                        logger.info("✅ Успешная авторизация в 3x-ui (по кукам)")
+                        return True
+            
+            logger.error(f"❌ Ошибка авторизации: {response.status_code}")
+            return False
+                
         except Exception as e:
             logger.error(f"❌ Ошибка при авторизации: {e}")
             return False
     
     def create_client(self, uuid: str, email: str, expiry_time: int, inbound_id: int = None) -> bool:
+        """Создание клиента в 3x-ui"""
         if not inbound_id:
             inbound_id = XRAY_INBOUND_ID
         
         try:
+            # Пробуем через API токен
+            if self.api_token:
+                add_client_url = f"{self.url}{self.path}/panel/api/inbounds/addClient"
+                headers = {
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Content-Type": "application/json"
+                }
+                
+                client_data = {
+                    "id": uuid,
+                    "email": email,
+                    "flow": "xtls-rprx-vision",
+                    "limitIp": 1,
+                    "totalGB": 0,
+                    "expiryTime": expiry_time,
+                    "enable": True,
+                    "tgId": "",
+                    "subId": ""
+                }
+                
+                payload = {
+                    "clients": [client_data],
+                    "inboundId": int(inbound_id)
+                }
+                
+                logger.info(f"📤 Создание клиента через API: {email}")
+                
+                response = self.session.post(
+                    add_client_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get('success'):
+                        logger.info(f"✅ Клиент {email} создан через API")
+                        return True
+                    else:
+                        logger.error(f"❌ Ошибка API: {result}")
+                
+                logger.warning("⚠️ API метод не сработал, пробуем стандартный...")
+            
+            # Стандартный метод через куки
+            if not self.logged_in:
+                if not self.login():
+                    return False
+            
+            add_client_url = f"{self.url}{self.path}/xray/inbound/addClient/{inbound_id}"
+            
             client_data = {
                 "id": uuid,
                 "email": email,
@@ -186,34 +256,88 @@ class XrayPanelAPI:
                 "clients": [client_data]
             }
             
+            logger.info(f"📤 Создание клиента: {email}")
+            
             response = self.session.post(
-                f"{self.url}{self.path}/xray/inbound/addClient/{inbound_id}",
+                add_client_url,
                 json=payload,
                 cookies=self.cookie,
                 timeout=30
             )
             
             if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    logger.info(f"✅ Клиент {email} создан в 3x-ui")
+                try:
+                    result = response.json()
+                    if result.get('success'):
+                        logger.info(f"✅ Клиент {email} создан в 3x-ui")
+                        return True
+                    else:
+                        logger.error(f"❌ Ошибка создания: {result}")
+                        return False
+                except:
+                    logger.info(f"✅ Клиент {email} создан (статус 200)")
                     return True
-                else:
-                    logger.error(f"❌ Ошибка создания клиента: {result}")
-                    return False
             else:
                 logger.error(f"❌ HTTP ошибка: {response.status_code} - {response.text}")
                 return False
+                
         except Exception as e:
             logger.error(f"❌ Ошибка при создании клиента: {e}")
             return False
+    
+    def get_inbounds(self) -> Optional[list]:
+        """Получение списка входящих подключений"""
+        try:
+            if self.api_token:
+                url = f"{self.url}{self.path}/panel/api/inbounds/list"
+                headers = {"Authorization": f"Bearer {self.api_token}"}
+                response = self.session.get(url, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get('success'):
+                        return result.get('obj', [])
+            
+            if not self.logged_in:
+                if not self.login():
+                    return None
+            
+            url = f"{self.url}{self.path}/xray/inbound/list"
+            response = self.session.get(url, cookies=self.cookie, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    return result.get('obj', [])
+            
+            return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения inbounds: {e}")
+            return None
 
 # Инициализируем API
 try:
-    xray_api = XrayPanelAPI(XRAY_PANEL_URL, XRAY_PANEL_PATH, XRAY_USERNAME, XRAY_PASSWORD)
+    xray_api = XrayPanelAPI(
+        XRAY_PANEL_URL, 
+        XRAY_PANEL_PATH, 
+        XRAY_USERNAME, 
+        XRAY_PASSWORD,
+        XRAY_API_TOKEN
+    )
     logger.info("API 3x-ui инициализирован")
+    
+    # Проверяем подключение
+    inbounds = xray_api.get_inbounds()
+    if inbounds:
+        logger.info(f"✅ Найдено входящих подключений: {len(inbounds)}")
+        for inbound in inbounds:
+            logger.info(f"  - ID: {inbound.get('id')}, Порт: {inbound.get('port')}, Протокол: {inbound.get('protocol')}")
+    else:
+        logger.warning("⚠️ Не удалось получить список inbounds")
+        
 except Exception as e:
-    logger.error(f"Ошибка инициализации API: {e}")
+    logger.error(f"❌ Ошибка инициализации API: {e}")
     xray_api = None
 
 # ======================= ГЕНЕРАЦИЯ КЛЮЧЕЙ =======================
@@ -245,9 +369,10 @@ def create_vpn_user_on_server(user_id: int, plan_id: str) -> tuple:
     plan = PLANS[plan_id]
     expiry_time = int((datetime.now() + timedelta(days=plan['days'])).timestamp() * 1000)
     
+    client_created = False
     if xray_api:
-        success = xray_api.create_client(user_uuid, email, expiry_time)
-        if success:
+        client_created = xray_api.create_client(user_uuid, email, expiry_time, int(XRAY_INBOUND_ID))
+        if client_created:
             logger.info(f"✅ Клиент создан на панели: {email}, порт: {port}")
         else:
             logger.warning(f"⚠️ Не удалось создать клиента на панели")
@@ -375,8 +500,6 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     end_date = start_date + timedelta(days=plan['days'])
     
     vpn_key, user_uuid, client_id, port = create_vpn_user_on_server(user_id, plan_id)
-    
-    # Генерируем UUID для подписки (для ссылки)
     subscription_uuid = str(uuid.uuid4())
     
     conn = sqlite3.connect('subscriptions.db')
@@ -588,7 +711,7 @@ async def show_keys(callback: CallbackQuery):
             keys_text += f"📊 Осталось: {days_left} дней\n"
             keys_text += "\n📌 <b>Инструкция:</b>\n"
             keys_text += "1. Скопируйте ключ полностью\n"
-            keys_text += "2. Вставьте в приложение (V2Ray, Nekoray, Shadowrocket)\n"
+            keys_text += "2. Вставьте в приложение (V2RayNG, Nekoray, Shadowrocket)\n"
             keys_text += "3. Подключитесь к серверу\n\n"
             keys_text += "➖➖➖➖➖➖➖➖➖➖➖➖\n\n"
         except Exception as e:
@@ -604,7 +727,6 @@ async def show_keys(callback: CallbackQuery):
 @dp.callback_query(F.data == "my_subscription")
 async def show_subscription(callback: CallbackQuery):
     user_id = callback.from_user.id
-    user = get_user(user_id)
     active_sub = get_active_subscription(user_id)
     
     if not active_sub:
@@ -617,7 +739,6 @@ async def show_subscription(callback: CallbackQuery):
         await callback.answer()
         return
     
-    # Ссылка на подписку для этого пользователя
     subscription_url = f"{SUBSCRIPTION_URL}/{active_sub.get('subscription_uuid', '')}"
     
     subscription_text = f"""
@@ -634,15 +755,14 @@ async def show_subscription(callback: CallbackQuery):
    • Hiddify: Нажмите "Add" → "Subscription URL"
 3. Приложение автоматически загрузит все ключи
 
-📅 Подписка действует до: {datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')}
-📱 Устройств: {active_sub.get('devices', 1)}
+📅 Действует до: {datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')}
 🔌 Порт: {active_sub.get('port', '?')}
 
 ⚠️ <b>Важно:</b> Ссылка персональная, не передавайте её другим.
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Скопировать ссылку", callback_data=f"copy_subscription_{active_sub.get('subscription_uuid', '')}")],
+        [InlineKeyboardButton(text="📋 Копировать ссылку", callback_data=f"copy_subscription_{active_sub.get('subscription_uuid', '')}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     
@@ -658,7 +778,6 @@ async def copy_subscription(callback: CallbackQuery):
     subscription_uuid = callback.data.replace("copy_subscription_", "")
     subscription_url = f"{SUBSCRIPTION_URL}/{subscription_uuid}"
     
-    # Отправляем отдельным сообщением для удобного копирования
     await callback.message.answer(
         f"🔗 <b>Ссылка для подписки:</b>\n\n"
         f"<code>{subscription_url}</code>\n\n"
@@ -709,12 +828,12 @@ async def process_plan_selection(callback: CallbackQuery):
 🔑 <b>Ваш VPN ключ:</b>
 <code>{vpn_key}</code>
 
-📌 <b>Инструкция по использованию:</b>
+📌 <b>Инструкция:</b>
 1. Скопируйте ключ
-2. Вставьте в приложение для подключения к VPN
-3. Подключитесь к серверу
+2. Вставьте в приложение
+3. Подключитесь
 
-Также вы можете использовать ссылку для подписки в разделе "📥 Ссылка для подписки".
+Ключ также доступен в разделе "Мои ключи".
 """
         
         await callback.message.edit_text(
@@ -804,7 +923,7 @@ async def check_payment_status(callback: CallbackQuery):
 📌 <b>Инструкция:</b>
 1. Скопируйте ключ или ссылку
 2. Вставьте в приложение
-3. Подключитесь к серверу
+3. Подключитесь
 
 Спасибо за покупку! 🔒
 """
