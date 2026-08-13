@@ -13,15 +13,13 @@ import uuid
 import requests
 from aiohttp import web
 
-# ======================= ПРЯМЫЕ НАСТРОЙКИ =======================
+# ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo"
 
-# Данные 3x-ui панели
+# Данные 3x-ui панели (из документации API)
 XRAY_PANEL_URL = "https://2.26.70.65:55347"
 XRAY_PANEL_PATH = "/mMH522DscvfBbpFwaA"
-XRAY_USERNAME = "fHRTAk9lFz"
-XRAY_PASSWORD = "pM0xjYSy4N"
-XRAY_INBOUND_ID = 2
+XRAY_INBOUND_ID = 2  # Kildear VPN
 XRAY_API_TOKEN = "tlZpRhpGQA54Uyta9p9chp42oymKG8NjoauzprvEqHSHqrye"
 
 # Настройки VPN
@@ -97,17 +95,6 @@ def init_db():
                   FOREIGN KEY (user_id) REFERENCES users (user_id),
                   FOREIGN KEY (subscription_id) REFERENCES subscriptions (id))''')
     
-    c.execute('''CREATE TABLE IF NOT EXISTS payments
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  payment_id TEXT UNIQUE,
-                  user_id INTEGER,
-                  plan_id TEXT,
-                  amount INTEGER,
-                  status TEXT,
-                  created_at TIMESTAMP,
-                  paid_at TIMESTAMP,
-                  FOREIGN KEY (user_id) REFERENCES users (user_id))''')
-    
     conn.commit()
     conn.close()
     logger.info("База данных инициализирована")
@@ -121,42 +108,18 @@ class XrayAPI:
         self.session.verify = False
         self.token = XRAY_API_TOKEN
         self.base_url = f"{XRAY_PANEL_URL}{XRAY_PANEL_PATH}"
-        self.logged_in = False
-        self.login()
-    
-    def login(self) -> bool:
-        """Авторизация для получения кук"""
-        try:
-            url = f"{self.base_url}/login"
-            data = {
-                "username": XRAY_USERNAME,
-                "password": XRAY_PASSWORD
-            }
-            
-            response = self.session.post(url, json=data, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    self.logged_in = True
-                    logger.info("✅ Успешная авторизация в панели")
-                    return True
-                else:
-                    logger.error(f"❌ Ошибка авторизации: {result}")
-                    return False
-            else:
-                logger.error(f"❌ HTTP {response.status_code}: {response.text}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return False
+        logger.info(f"✅ API URL: {self.base_url}")
     
     def add_client(self, uuid: str, email: str, expiry_time: int) -> bool:
-        """Добавление клиента через API"""
+        """
+        Добавление клиента через API 3x-ui
+        POST /panel/api/inbounds/addClient
+        """
         try:
-            # ПРАВИЛЬНЫЙ API ПУТЬ из вашего URL
+            # Правильный эндпоинт из документации
             url = f"{self.base_url}/panel/api/inbounds/addClient"
             
+            # Формат запроса из документации
             payload = {
                 "clients": [{
                     "id": uuid,
@@ -177,18 +140,19 @@ class XrayAPI:
                 "Content-Type": "application/json"
             }
             
-            logger.info(f"📤 URL: {url}")
-            logger.info(f"📤 Клиент: {email}")
-            logger.info(f"📤 Inbound: {XRAY_INBOUND_ID}")
+            logger.info(f"📤 Создание клиента: {email}")
+            logger.info(f"📤 Inbound ID: {XRAY_INBOUND_ID}")
+            logger.info(f"📤 UUID: {uuid}")
+            logger.info(f"📤 Expiry: {expiry_time}")
             
             response = self.session.post(url, json=payload, headers=headers, timeout=30)
             
             logger.info(f"📥 Статус: {response.status_code}")
+            logger.info(f"📥 Ответ: {response.text[:500]}")
             
             if response.status_code == 200:
                 try:
                     result = response.json()
-                    logger.info(f"📥 Ответ: {json.dumps(result, indent=2)}")
                     if result.get('success'):
                         logger.info(f"✅ Клиент {email} создан!")
                         return True
@@ -205,37 +169,13 @@ class XrayAPI:
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
             return False
-    
-    def get_clients(self) -> Optional[list]:
-        """Получение списка клиентов"""
-        try:
-            url = f"{self.base_url}/panel/api/inbounds/get/{XRAY_INBOUND_ID}"
-            headers = {"Authorization": f"Bearer {self.token}"}
-            
-            response = self.session.get(url, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    return result.get('obj', {}).get('clients', [])
-            return None
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            return None
 
 # Создаем экземпляр API
 xray_api = XrayAPI()
 
-# Проверяем подключение
-logger.info("🔍 Проверка подключения...")
-clients = xray_api.get_clients()
-if clients is not None:
-    logger.info(f"✅ Найдено клиентов: {len(clients)}")
-else:
-    logger.warning("⚠️ Не удалось получить список клиентов")
-
 # ======================= ГЕНЕРАЦИЯ КЛЮЧА =======================
 def generate_vless_link(uuid: str, email: str) -> str:
+    """Генерация VLESS ключа для Kildear VPN"""
     vless_link = (
         f"vless://{uuid}@"
         f"{VPN_SERVER_IP}:{VPN_SERVER_PORT}"
@@ -674,9 +614,8 @@ async def main():
     await site.start()
     
     logger.info(f"🚀 Бот запущен на порту {port}")
-    logger.info(f"📡 Панель: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/clients")
+    logger.info(f"📡 API: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/api/inbounds/addClient")
     logger.info(f"📡 Inbound ID: {XRAY_INBOUND_ID}")
-    logger.info(f"📡 API: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/api/")
     
     try:
         await asyncio.Event().wait()
