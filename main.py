@@ -24,7 +24,7 @@ from flask import Flask, request
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
 PANEL_URL = "https://2.26.70.65:55347"
-DB_URL = "http://2.26.70.65:8081"  # SQLite Web API
+API_URL = "http://2.26.70.65:8082"  # Ваш API на сервере
 
 YKASSA_SHOP_ID = os.environ.get("YKASSA_SHOP_ID", "1434221")
 YKASSA_SECRET_KEY = os.environ.get("YKASSA_SECRET_KEY", "live_fH2K3m3SygBdP8P6bjaOwkRj4UKl5FwsatLZC-PJKt8")
@@ -129,69 +129,22 @@ def get_referral_keyboard(ref_code: str):
     ])
     return keyboard
 
-# ======================= СОЗДАНИЕ КЛИЕНТА ЧЕРЕЗ SQLITE WEB API =======================
+# ======================= СОЗДАНИЕ VPN-КЛЮЧА ЧЕРЕЗ ВАШ API =======================
 async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
-    """Создаёт VPN-ключ через SQLite Web API"""
-    username = f"user_{telegram_id}_{int(datetime.now().timestamp())}"
-    expiry_date = datetime.now() + timedelta(days=days)
-    expiry_timestamp = int(expiry_date.timestamp() * 1000)
-
+    """Создаёт VPN-ключ через ваш API на сервере"""
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Получаем первый активный Inbound через правильный URL
-            async with session.get(f"{DB_URL}/inbounds/") as resp:
-                if resp.status != 200:
-                    logging.error(f"Ошибка получения Inbound: {resp.status}")
+            url = f"{API_URL}/create_user?telegram_id={telegram_id}&days={days}"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    sub_url = await resp.text()
+                    return sub_url.strip()
+                else:
+                    error_text = await resp.text()
+                    logging.error(f"Ошибка API: {resp.status} - {error_text}")
                     return None
-                data = await resp.json()
-                
-                # SQLite Web возвращает список объектов
-                rows = data.get("rows", [])
-                if not rows:
-                    logging.error("Нет активных Inbound в базе")
-                    return None
-                
-                # Берём первый Inbound
-                inbound = rows[0]
-                inbound_id = inbound[0]  # id
-                settings = json.loads(inbound[11])  # settings - 12-е поле (индекс 11)
-                
-                if "clients" not in settings:
-                    settings["clients"] = []
-                
-                # Проверяем, не существует ли уже клиент
-                for client in settings["clients"]:
-                    if client.get("email") == username:
-                        return f"{PANEL_URL}/sub/{username}"
-                
-                # Добавляем нового клиента
-                new_client = {
-                    "id": username,
-                    "flow": "xtls-rprx-vision",
-                    "email": username,
-                    "limitIp": 5,
-                    "totalGB": 0
-                }
-                
-                settings["clients"].append(new_client)
-                
-                # 2. Обновляем Inbound через API
-                update_data = {
-                    "settings": json.dumps(settings)
-                }
-                
-                async with session.post(
-                    f"{DB_URL}/inbounds/{inbound_id}",
-                    json=update_data
-                ) as resp:
-                    if resp.status == 200:
-                        sub_url = f"{PANEL_URL}/sub/{username}"
-                        return sub_url
-                    else:
-                        logging.error(f"Ошибка обновления Inbound: {resp.status}")
-                        return None
     except Exception as e:
-        logging.error(f"Ошибка при работе с БД: {e}")
+        logging.error(f"Ошибка при запросе к API: {e}")
         return None
 
 # ======================= РАБОТА С ЮKASSA =======================
