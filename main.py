@@ -52,11 +52,10 @@ bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_m
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Хранилище данных
 user_orders = {}
-user_referrals = {}  # {user_id: {"ref_code": "123456789", "refs": [user_id1, user_id2]}}
-user_free_days = {}  # {user_id: free_days}
-pending_referral = {}  # {user_id: inviter_id} для отслеживания переходов по ссылке
+user_referrals = {}
+user_free_days = {}
+pending_referral = {}
 
 # ======================= СОСТОЯНИЯ FSM =======================
 class OrderState(StatesGroup):
@@ -96,6 +95,25 @@ def get_plans_keyboard():
     ])
     return keyboard
 
+def get_payment_keyboard(payment_url_card: str, payment_url_sbp: str = None):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Оплатить картой", url=payment_url_card)]
+    ])
+    
+    if payment_url_sbp:
+        keyboard.inline_keyboard.append(
+            [InlineKeyboardButton(text="📱 Оплатить через СБП", url=payment_url_sbp)]
+        )
+    
+    keyboard.inline_keyboard.append(
+        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_payment")]
+    )
+    keyboard.inline_keyboard.append(
+        [InlineKeyboardButton(text="❌ Отменить заказ", callback_data="cancel_order")]
+    )
+    
+    return keyboard
+
 def get_referral_keyboard(ref_code: str):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -116,14 +134,6 @@ def get_referral_keyboard(ref_code: str):
                 callback_data="back_to_menu"
             )
         ]
-    ])
-    return keyboard
-
-def get_payment_keyboard(payment_url: str):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Оплатить через ЮKassa", url=payment_url)],
-        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_payment")],
-        [InlineKeyboardButton(text="❌ Отменить заказ", callback_data="cancel_order")]
     ])
     return keyboard
 
@@ -181,17 +191,30 @@ async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
         return None
 
 # ======================= РАБОТА С ЮKASSA =======================
-async def create_yookassa_invoice(amount: float, description: str, order_id: str) -> tuple:
+async def create_yookassa_invoice(amount: float, description: str, order_id: str, payment_method: str = "bank_card") -> tuple:
+    """Создаёт платёж в ЮKassa.
+    payment_method: "bank_card" или "sbp"
+    """
     idempotence_key = str(uuid.uuid4())
+
+    # Настройка способа оплаты
+    payment_method_data = {"type": payment_method}
+    
+    # Для СБП добавляем дополнительные параметры
+    if payment_method == "sbp":
+        payment_method_data = {
+            "type": "sbp",
+            "sbp": {
+                "bank_id": None  # Автоматический выбор банка
+            }
+        }
 
     payload = {
         "amount": {
             "value": str(amount),
             "currency": "RUB"
         },
-        "payment_method_data": {
-            "type": "bank_card"
-        },
+        "payment_method_data": payment_method_data,
         "confirmation": {
             "type": "redirect",
             "return_url": "https://t.me/kildear_vpn_bot"
@@ -214,7 +237,7 @@ async def create_yookassa_invoice(amount: float, description: str, order_id: str
         try:
             async with session.post(YKASSA_API_URL, json=payload, headers=headers, auth=auth) as resp:
                 data = await resp.json()
-                logging.info(f"Ответ ЮKassa: {data}")
+                logging.info(f"Ответ ЮKassa ({payment_method}): {data}")
                 if data.get("status") in ["pending", "waiting_for_capture"]:
                     return data["confirmation"]["confirmation_url"], data["id"]
                 else:
@@ -239,12 +262,10 @@ async def check_yookassa_payment(payment_id: str) -> str:
 
 # ======================= РЕФЕРАЛЬНАЯ СИСТЕМА =======================
 def generate_ref_code(user_id: int) -> str:
-    """Генерирует уникальный реферальный код"""
     import hashlib
     return hashlib.md5(f"{user_id}_{datetime.now().timestamp()}".encode()).hexdigest()[:8]
 
 def get_or_create_ref_data(user_id: int):
-    """Получает или создаёт реферальные данные для пользователя"""
     if user_id not in user_referrals:
         user_referrals[user_id] = {
             "ref_code": generate_ref_code(user_id),
@@ -254,15 +275,12 @@ def get_or_create_ref_data(user_id: int):
     return user_referrals[user_id]
 
 async def add_free_days(user_id: int, days: int):
-    """Добавляет бесплатные дни пользователю"""
     if user_id not in user_free_days:
         user_free_days[user_id] = 0
     user_free_days[user_id] += days
     logging.info(f"Пользователю {user_id} добавлено {days} бесплатных дней. Всего: {user_free_days[user_id]}")
 
 async def process_referral(new_user_id: int, ref_code: str):
-    """Обрабатывает переход по реферальной ссылке"""
-    # Ищем пользователя с таким реферальным кодом
     inviter_id = None
     for uid, data in user_referrals.items():
         if data["ref_code"] == ref_code:
@@ -272,16 +290,13 @@ async def process_referral(new_user_id: int, ref_code: str):
     if not inviter_id or inviter_id == new_user_id:
         return
 
-    # Проверяем, не приглашал ли уже этот пользователь
     if new_user_id in user_referrals[inviter_id]["refs"]:
         return
 
-    # Сохраняем информацию о том, кто пригласил
     pending_referral[new_user_id] = inviter_id
     logging.info(f"Пользователь {new_user_id} перешел по ссылке от {inviter_id}")
 
 async def activate_referral(user_id: int):
-    """Активирует реферальную связь после покупки"""
     if user_id not in pending_referral:
         return
 
@@ -289,14 +304,10 @@ async def activate_referral(user_id: int):
     if inviter_id not in user_referrals:
         return
 
-    # Добавляем пользователя в список приглашённых
     if user_id not in user_referrals[inviter_id]["refs"]:
         user_referrals[inviter_id]["refs"].append(user_id)
-
-        # Начисляем 7 бесплатных дней пригласившему
         await add_free_days(inviter_id, 7)
 
-        # Уведомляем пригласившего
         await bot.send_message(
             chat_id=inviter_id,
             text=f"🎉 <b>Ваш друг купил подписку!</b>\n\n"
@@ -306,7 +317,6 @@ async def activate_referral(user_id: int):
             parse_mode="HTML"
         )
 
-    # Удаляем из ожидания
     del pending_referral[user_id]
 
 # ======================= ОБРАБОТЧИКИ КОМАНД =======================
@@ -315,12 +325,10 @@ async def cmd_start(message: Message):
     args = message.text.split()
     user_id = message.from_user.id
 
-    # Проверяем, есть ли реферальный код
     if len(args) > 1 and args[1].startswith("ref_"):
         ref_code = args[1].replace("ref_", "")
         await process_referral(user_id, ref_code)
 
-    # Убеждаемся, что у пользователя есть реферальные данные
     get_or_create_ref_data(user_id)
 
     await message.answer(
@@ -428,10 +436,8 @@ async def process_plan_selection(callback: CallbackQuery, state: FSMContext):
 
     # БЕСПЛАТНЫЙ ТАРИФ
     if plan["price"] == 0:
-        # Проверяем, есть ли у пользователя накопленные бесплатные дни
         free_days = user_free_days.get(user_id, 0)
         if free_days > 0:
-            # Можно использовать бесплатные дни вместо тестового периода
             await callback.message.answer(
                 f"🎁 <b>У вас есть {free_days} бесплатных дней!</b>\n\n"
                 f"Хотите активировать их сейчас?",
@@ -453,7 +459,6 @@ async def process_plan_selection(callback: CallbackQuery, state: FSMContext):
             )
             return
 
-        # Если нет бесплатных дней, выдаём тестовый период
         await callback.message.answer(
             f"🎁 <b>Тестовый доступ на 2 дня!</b>\n\n"
             f"Создаю ваш бесплатный VPN-ключ...",
@@ -491,19 +496,29 @@ async def process_plan_selection(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
-    payment_url, payment_id = await create_yookassa_invoice(
+    # Создаём два платежа: картой и СБП
+    payment_url_card, payment_id_card = await create_yookassa_invoice(
         amount=plan["price"],
-        description=f"Kildear VPN — {plan['label']}",
-        order_id=order_id
+        description=f"Kildear VPN — {plan['label']} (карта)",
+        order_id=order_id,
+        payment_method="bank_card"
     )
 
-    if not payment_url:
+    payment_url_sbp, payment_id_sbp = await create_yookassa_invoice(
+        amount=plan["price"],
+        description=f"Kildear VPN — {plan['label']} (СБП)",
+        order_id=order_id,
+        payment_method="sbp"
+    )
+
+    if not payment_url_card:
         await callback.message.answer("❌ Ошибка при создании счёта. Попробуйте позже.")
         return
 
     user_orders[user_id] = {
         "order_id": order_id,
-        "payment_id": payment_id,
+        "payment_id": payment_id_card,  # Основной payment_id (карта)
+        "payment_id_sbp": payment_id_sbp,  # Дополнительный для СБП
         "plan": plan_key,
         "days": plan["days"],
         "price": plan["price"],
@@ -518,9 +533,8 @@ async def process_plan_selection(callback: CallbackQuery, state: FSMContext):
         f"Тариф: {plan['label']}\n"
         f"Стоимость: {plan['price']} ₽\n"
         f"Устройств: {plan['devices']}\n\n"
-        f"Нажмите кнопку ниже, чтобы оплатить.\n"
-        f"После оплаты нажмите «Проверить оплату».",
-        reply_markup=get_payment_keyboard(payment_url),
+        f"Выберите способ оплаты:",
+        reply_markup=get_payment_keyboard(payment_url_card, payment_url_sbp),
         parse_mode="HTML"
     )
 
@@ -598,7 +612,12 @@ async def check_payment(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("✅ Этот заказ уже оплачен!")
         return
 
+    # Проверяем статус по основному платежу (карта)
     status = await check_yookassa_payment(order["payment_id"])
+
+    # Если карта не оплачена, проверяем СБП
+    if status not in ["succeeded", "waiting_for_capture"] and order.get("payment_id_sbp"):
+        status = await check_yookassa_payment(order["payment_id_sbp"])
 
     if status in ["succeeded", "waiting_for_capture"]:
         order["status"] = "paid"
@@ -619,7 +638,6 @@ async def check_payment(callback: CallbackQuery, state: FSMContext):
                 parse_mode="HTML"
             )
 
-            # Активируем реферальную связь (если пользователь был приглашён)
             await activate_referral(user_id)
 
             del user_orders[user_id]
@@ -683,7 +701,6 @@ def yookassa_webhook():
                 parse_mode="HTML"
             ))
 
-            # Активируем реферальную связь
             asyncio.run(activate_referral(user_id))
         else:
             asyncio.run(bot.send_message(
