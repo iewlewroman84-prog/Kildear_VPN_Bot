@@ -14,20 +14,20 @@ import hashlib
 import secrets
 import string
 import json
+import uuid
 from aiohttp import web
 
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
 
-# ЮKassa - ВРЕМЕННО ОТКЛЮЧАЕМ ДЛЯ ТЕСТА
-# YKASSA_SHOP_ID = os.environ.get("YKASSA_SHOP_ID", "1434221")
-# YKASSA_SECRET_KEY = os.environ.get("YKASSA_SECRET_KEY", "live_fH2K3m3SygBdP8P6bjaOwkRj4UKl5FwsatLZC-PJKt8")
-# YKASSA_API_URL = "https://api.yookassa.ru/v3/payments"
-# YKASSA_WEBHOOK_URL = os.environ.get("YKASSA_WEBHOOK_URL", "https://kildear-vpn-bot.onrender.com/webhook/yookassa")
+# Настройки VPN сервера (замените на свои)
+VPN_SERVER_IP = os.environ.get("VPN_SERVER_IP", "2.26.70.65")  # IP вашего сервера
+VPN_SERVER_PORT = os.environ.get("VPN_SERVER_PORT", "443")
+VPN_DOMAIN = os.environ.get("VPN_DOMAIN", "example.com")  # Ваш домен
 
 # Настройки VPN ключей
-VPN_KEY_LENGTH = 32
-VPN_KEY_PREFIX = "KILDEAR-"
+VPN_KEY_LENGTH = 36
+VPN_KEY_PREFIX = "vless://"
 
 # ======================= ТАРИФЫ =======================
 PLANS = {
@@ -94,11 +94,65 @@ def init_db():
 init_db()
 
 # ======================= ГЕНЕРАЦИЯ VPN КЛЮЧЕЙ =======================
-def generate_vpn_key() -> str:
-    """Генерация уникального VPN ключа"""
-    alphabet = string.ascii_uppercase + string.digits
-    random_part = ''.join(secrets.choice(alphabet) for _ in range(VPN_KEY_LENGTH))
-    return f"{VPN_KEY_PREFIX}{random_part}"
+def generate_vless_key(user_id: int, plan_id: str) -> str:
+    """
+    Генерация VLESS ключа в формате:
+    vless://UUID@IP:PORT?type=tcp&encryption=none&security=none#NAME
+    """
+    # Генерируем UUID для пользователя
+    user_uuid = str(uuid.uuid4())
+    
+    # Создаем имя для ключа (можно использовать план и ID пользователя)
+    key_name = f"Kildear_{plan_id}_{user_id}"
+    
+    # Формируем VLESS ссылку
+    vless_link = (
+        f"vless://{user_uuid}@"
+        f"{VPN_SERVER_IP}:{VPN_SERVER_PORT}?"
+        f"type=tcp&encryption=none&security=none"
+        f"#{key_name}"
+    )
+    
+    return vless_link
+
+def generate_vmess_key(user_id: int, plan_id: str) -> str:
+    """
+    Генерация VMESS ключа (запасной вариант)
+    """
+    # Генерируем UUID
+    user_uuid = str(uuid.uuid4())
+    
+    # Создаем VMESS конфиг
+    vmess_config = {
+        "v": "2",
+        "ps": f"Kildear_{plan_id}_{user_id}",
+        "add": VPN_SERVER_IP,
+        "port": VPN_SERVER_PORT,
+        "id": user_uuid,
+        "aid": "0",
+        "net": "tcp",
+        "type": "none",
+        "host": "",
+        "path": "",
+        "tls": "none"
+    }
+    
+    # Кодируем в base64
+    vmess_json = json.dumps(vmess_config)
+    vmess_base64 = base64.b64encode(vmess_json.encode()).decode()
+    vmess_link = f"vmess://{vmess_base64}"
+    
+    return vmess_link
+
+def generate_vpn_key(user_id: int, plan_id: str, key_type: str = "vless") -> str:
+    """Генерация VPN ключа в зависимости от типа"""
+    if key_type == "vless":
+        return generate_vless_key(user_id, plan_id)
+    elif key_type == "vmess":
+        return generate_vmess_key(user_id, plan_id)
+    else:
+        # По умолчанию VLESS
+        return generate_vless_key(user_id, plan_id)
 
 def is_key_unique(key: str) -> bool:
     """Проверка уникальности ключа"""
@@ -109,11 +163,11 @@ def is_key_unique(key: str) -> bool:
     conn.close()
     return count == 0
 
-def get_unique_vpn_key() -> str:
+def get_unique_vpn_key(user_id: int, plan_id: str) -> str:
     """Генерация уникального VPN ключа с проверкой"""
     max_attempts = 10
     for _ in range(max_attempts):
-        key = generate_vpn_key()
+        key = generate_vpn_key(user_id, plan_id)
         if is_key_unique(key):
             return key
     raise Exception("Не удалось сгенерировать уникальный ключ")
@@ -183,8 +237,8 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     # Деактивируем старые подписки
     c.execute("UPDATE subscriptions SET status = 'inactive' WHERE user_id = ? AND status = 'active'", (user_id,))
     
-    # Генерируем VPN ключ
-    vpn_key = get_unique_vpn_key()
+    # Генерируем VPN ключ (VLESS)
+    vpn_key = get_unique_vpn_key(user_id, plan_id)
     
     # Создаем новую подписку
     c.execute("""INSERT INTO subscriptions 
@@ -362,8 +416,8 @@ async def show_keys(callback: CallbackQuery):
             keys_text += f"⏳ Действует до: {expires.strftime('%d.%m.%Y')}\n"
             keys_text += f"📊 Осталось: {days_left} дней\n"
             keys_text += "\n📌 <b>Инструкция:</b>\n"
-            keys_text += "1. Скачайте приложение VPN\n"
-            keys_text += f"2. Введите ключ: <code>{key}</code>\n"
+            keys_text += "1. Скопируйте ключ полностью\n"
+            keys_text += "2. Вставьте в приложение VPN (V2Ray, Nekoray, Shadowrocket и т.д.)\n"
             keys_text += "3. Подключитесь к серверу\n\n"
             keys_text += "➖➖➖➖➖➖➖➖➖➖➖➖\n\n"
         except Exception as e:
@@ -421,8 +475,8 @@ async def process_plan_selection(callback: CallbackQuery):
 <code>{vpn_key}</code>
 
 📌 <b>Инструкция по использованию:</b>
-1. Скачайте VPN клиент
-2. Введите ключ: <code>{vpn_key}</code>
+1. Скопируйте ключ
+2. Вставьте в приложение для подключения к VPN
 3. Подключитесь к серверу
 
 Ключ также доступен в разделе "Мои ключи".
@@ -487,8 +541,8 @@ async def test_activate(callback: CallbackQuery):
 <code>{vpn_key}</code>
 
 📌 <b>Инструкция по использованию:</b>
-1. Скачайте VPN клиент
-2. Введите ключ: <code>{vpn_key}</code>
+1. Скопируйте ключ полностью
+2. Вставьте в приложение для подключения к VPN
 3. Подключитесь к серверу
 
 Ключ также доступен в разделе "Мои ключи".
@@ -569,6 +623,16 @@ async def show_help(callback: CallbackQuery):
 <b>Как получить VPN ключ?</b>
 После активации подписки ключ придет в сообщении.
 Вы также можете посмотреть его в разделе "Мои ключи".
+
+<b>Как использовать ключ?</b>
+1. Скопируйте весь ключ (начинается с vless://)
+2. Вставьте в приложение:
+   • V2Ray / V2RayNG
+   • Nekoray
+   • Shadowrocket
+   • Qv2ray
+   • Другие клиенты, поддерживающие VLESS
+3. Подключитесь к серверу
 
 <b>Бесплатный период</b>
 Вы можете получить 2 дня бесплатно, чтобы протестировать сервис.
