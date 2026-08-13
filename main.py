@@ -3,10 +3,11 @@ import asyncio
 import json
 import logging
 import uuid
+import aiohttp
 from datetime import datetime, timedelta
 from typing import Optional
+from flask import Flask, request
 
-# ===== УСТАНАВЛИВАЕМ АЛЬТЕРНАТИВНЫЙ АДРЕС ДЛЯ TELEGRAM API =====
 os.environ["TELEGRAM_BOT_API_URL"] = "https://telegram.dog/bot"
 
 from aiogram import Bot, Dispatcher, types, F
@@ -18,13 +19,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 
-import aiohttp
-from flask import Flask, request
-
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
-PANEL_URL = "https://2.26.70.65:55347"
-API_URL = "http://2.26.70.65:8082"  # Ваш API на сервере
+PANEL_URL = "https://2.26.70.65:55347/mMH522DscvfBbpFwaA"
+API_TOKEN = "Mmqbc6A4SZweWxXOMIRl92znDOmyk6UV"
+SERVER_IP = "2.26.70.65"
+INBOUND_ID = 2  # Твой рабочий Inbound
+PORT = 40224
 
 YKASSA_SHOP_ID = os.environ.get("YKASSA_SHOP_ID", "1434221")
 YKASSA_SECRET_KEY = os.environ.get("YKASSA_SECRET_KEY", "live_fH2K3m3SygBdP8P6bjaOwkRj4UKl5FwsatLZC-PJKt8")
@@ -52,7 +53,6 @@ user_referrals = {}
 user_free_days = {}
 pending_referral = {}
 
-# ======================= СОСТОЯНИЯ FSM =======================
 class OrderState(StatesGroup):
     waiting_for_payment = State()
 
@@ -129,22 +129,64 @@ def get_referral_keyboard(ref_code: str):
     ])
     return keyboard
 
-# ======================= СОЗДАНИЕ VPN-КЛЮЧА ЧЕРЕЗ ВАШ API =======================
+# ======================= СОЗДАНИЕ VPN-КЛЮЧА ЧЕРЕЗ API 3X-UI =======================
 async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
-    """Создаёт VPN-ключ через ваш API на сервере"""
+    """Создаёт VPN-ключ через официальный API 3x-ui"""
     try:
+        # Генерируем UUID
+        client_uuid = str(uuid.uuid4())
+        username = f"user_{telegram_id}_{int(datetime.now().timestamp())}"
+        expiry_date = datetime.now() + timedelta(days=days)
+        expiry_timestamp = int(expiry_date.timestamp() * 1000)
+
+        logging.info(f"📌 НОВАЯ ПОДПИСКА")
+        logging.info(f"📱 Telegram ID: {telegram_id}")
+        logging.info(f"📅 Дней: {days}")
+        logging.info(f"👤 Имя: {username}")
+        logging.info(f"🔑 UUID: {client_uuid}")
+
+        # Данные для API
+        client_data = {
+            "email": username,
+            "limitIp": 5,
+            "totalGB": 0,
+            "expiryTime": expiry_timestamp,
+            "enable": True,
+            "inbounds": [INBOUND_ID]
+        }
+
+        headers = {
+            "Authorization": f"Bearer {API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
         async with aiohttp.ClientSession() as session:
-            url = f"{API_URL}/create_user?telegram_id={telegram_id}&days={days}"
-            async with session.get(url) as resp:
+            # Создаём клиента через API
+            async with session.post(
+                f"{PANEL_URL}/panel/api/clients/add",
+                json=client_data,
+                headers=headers,
+                ssl=False
+            ) as resp:
+                response_text = await resp.text()
+                logging.info(f"Ответ API: {response_text}")
+                
                 if resp.status == 200:
-                    sub_url = await resp.text()
-                    return sub_url.strip()
+                    data = json.loads(response_text)
+                    if data.get("success"):
+                        # Генерируем VLESS-ссылку
+                        vless_link = f"vless://{client_uuid}@{SERVER_IP}:{PORT}?type=ws&encryption=none&path=%2Fvpn&host=&security=none#{username}"
+                        logging.info(f"✅ Ссылка: {vless_link}")
+                        return vless_link
+                    else:
+                        logging.error(f"Ошибка API: {data}")
+                        return None
                 else:
-                    error_text = await resp.text()
-                    logging.error(f"Ошибка API: {resp.status} - {error_text}")
+                    logging.error(f"HTTP ошибка: {resp.status} - {response_text}")
                     return None
+
     except Exception as e:
-        logging.error(f"Ошибка при запросе к API: {e}")
+        logging.error(f"Ошибка создания клиента: {e}")
         return None
 
 # ======================= РАБОТА С ЮKASSA =======================
