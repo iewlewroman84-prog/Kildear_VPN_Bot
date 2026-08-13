@@ -22,10 +22,10 @@ from aiohttp import web
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
 
 # Настройки 3x-ui панели
-XRAY_PANEL_URL = os.environ.get("XRAY_PANEL_URL", "https://your-panel.com:2053")  # URL панели
-XRAY_USERNAME = os.environ.get("XRAY_USERNAME", "admin")  # Логин панели
-XRAY_PASSWORD = os.environ.get("XRAY_PASSWORD", "admin")  # Пароль панели
-XRAY_INBOUND_ID = os.environ.get("XRAY_INBOUND_ID", "1")  # ID входящего подключения
+XRAY_PANEL_URL = os.environ.get("XRAY_PANEL_URL", "https://your-panel.com:2053")
+XRAY_USERNAME = os.environ.get("XRAY_USERNAME", "admin")
+XRAY_PASSWORD = os.environ.get("XRAY_PASSWORD", "admin")
+XRAY_INBOUND_ID = os.environ.get("XRAY_INBOUND_ID", "1")
 
 # Настройки VPN сервера
 VPN_SERVER_IP = os.environ.get("VPN_SERVER_IP", "YOUR_SERVER_IP")
@@ -53,7 +53,6 @@ def init_db():
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
     
-    # Таблица пользователей
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, 
                   username TEXT,
@@ -64,7 +63,6 @@ def init_db():
                   subscription_end TIMESTAMP,
                   devices INTEGER DEFAULT 1)''')
     
-    # Таблица подписок
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER,
@@ -79,7 +77,6 @@ def init_db():
                   client_id TEXT,
                   FOREIGN KEY (user_id) REFERENCES users (user_id))''')
     
-    # Таблица VPN ключей
     c.execute('''CREATE TABLE IF NOT EXISTS vpn_keys
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   key TEXT UNIQUE,
@@ -107,12 +104,11 @@ class XrayPanelAPI:
         self.username = username
         self.password = password
         self.session = requests.Session()
-        self.session.verify = False  # Отключаем SSL для тестов
+        self.session.verify = False
         self.cookie = None
         self.login()
     
     def login(self) -> bool:
-        """Авторизация в панели 3x-ui"""
         try:
             login_data = {
                 "username": self.username,
@@ -125,21 +121,23 @@ class XrayPanelAPI:
                 timeout=30
             )
             
-            if response.status_code == 200 and response.json().get('success'):
-                self.cookie = response.cookies.get_dict()
-                logger.info("Успешная авторизация в 3x-ui")
-                return True
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    self.cookie = response.cookies.get_dict()
+                    logger.info("Успешная авторизация в 3x-ui")
+                    return True
+                else:
+                    logger.error(f"Ошибка авторизации: {result}")
+                    return False
             else:
-                logger.error(f"Ошибка авторизации: {response.text}")
+                logger.error(f"HTTP ошибка: {response.status_code}")
                 return False
         except Exception as e:
             logger.error(f"Ошибка при авторизации: {e}")
             return False
     
     def create_client(self, uuid: str, email: str, expiry_time: int, inbound_id: int = None) -> bool:
-        """
-        Создание клиента в 3x-ui
-        """
         if not inbound_id:
             inbound_id = XRAY_INBOUND_ID
         
@@ -176,15 +174,13 @@ class XrayPanelAPI:
                     logger.error(f"Ошибка создания клиента: {result}")
                     return False
             else:
-                logger.error(f"HTTP ошибка: {response.status_code} - {response.text}")
+                logger.error(f"HTTP ошибка: {response.status_code}")
                 return False
-                
         except Exception as e:
             logger.error(f"Ошибка при создании клиента: {e}")
             return False
     
     def remove_client(self, client_id: str, inbound_id: int = None) -> bool:
-        """Удаление клиента из 3x-ui"""
         if not inbound_id:
             inbound_id = XRAY_INBOUND_ID
         
@@ -204,59 +200,21 @@ class XrayPanelAPI:
         except Exception as e:
             logger.error(f"Ошибка удаления клиента: {e}")
             return False
-    
-    def get_inbound_info(self, inbound_id: int = None) -> Optional[Dict]:
-        """Получение информации о входящем подключении"""
-        if not inbound_id:
-            inbound_id = XRAY_INBOUND_ID
-        
-        try:
-            response = self.session.get(
-                f"{self.url}/xray/inbound/get/{inbound_id}",
-                cookies=self.cookie,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            return None
-        except Exception as e:
-            logger.error(f"Ошибка получения информации: {e}")
-            return None
-    
-    def get_client_info(self, client_id: str, inbound_id: int = None) -> Optional[Dict]:
-        """Получение информации о клиенте"""
-        if not inbound_id:
-            inbound_id = XRAY_INBOUND_ID
-        
-        try:
-            response = self.session.get(
-                f"{self.url}/xray/inbound/client/{inbound_id}/{client_id}",
-                cookies=self.cookie,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            return None
-        except Exception as e:
-            logger.error(f"Ошибка получения информации о клиенте: {e}")
-            return None
 
 # Инициализируем API
-xray_api = XrayPanelAPI(XRAY_PANEL_URL, XRAY_USERNAME, XRAY_PASSWORD)
+try:
+    xray_api = XrayPanelAPI(XRAY_PANEL_URL, XRAY_USERNAME, XRAY_PASSWORD)
+    logger.info("API 3x-ui инициализирован")
+except Exception as e:
+    logger.error(f"Ошибка инициализации API: {e}")
+    xray_api = None
 
 # ======================= ГЕНЕРАЦИЯ VPN КЛЮЧЕЙ =======================
 def generate_vless_link(uuid: str, email: str) -> str:
-    """
-    Генерация VLESS ссылки для подключения
-    """
-    # Параметры подключения
     flow = "xtls-rprx-vision"
     encryption = "none"
     security = "none"
     
-    # Формируем VLESS ссылку
     vless_link = (
         f"vless://{uuid}@"
         f"{VPN_SERVER_IP}:{VPN_SERVER_PORT}"
@@ -270,60 +228,21 @@ def generate_vless_link(uuid: str, email: str) -> str:
     
     return vless_link
 
-def generate_vmess_link(uuid: str, email: str) -> str:
-    """
-    Генерация VMESS ссылки
-    """
-    vmess_config = {
-        "v": "2",
-        "ps": email,
-        "add": VPN_SERVER_IP,
-        "port": VPN_SERVER_PORT,
-        "id": uuid,
-        "aid": "0",
-        "net": "tcp",
-        "type": "none",
-        "host": "",
-        "path": "",
-        "tls": "none"
-    }
-    
-    vmess_json = json.dumps(vmess_config)
-    vmess_base64 = base64.b64encode(vmess_json.encode()).decode()
-    return f"vmess://{vmess_base64}"
-
 def create_vpn_user_on_server(user_id: int, plan_id: str) -> tuple:
-    """
-    Создание пользователя на 3x-ui панели
-    Возвращает (vless_link, uuid, client_id)
-    """
-    # Генерируем UUID
     user_uuid = str(uuid.uuid4())
-    
-    # Создаем email для пользователя
     email = f"user_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     
-    # Вычисляем время истечения (в миллисекундах)
     plan = PLANS[plan_id]
     expiry_time = int((datetime.now() + timedelta(days=plan['days'])).timestamp() * 1000)
     
-    # Создаем клиента в 3x-ui
-    success = xray_api.create_client(user_uuid, email, expiry_time)
+    # Пытаемся создать клиента в 3x-ui
+    if xray_api:
+        success = xray_api.create_client(user_uuid, email, expiry_time)
+        if not success:
+            logger.warning(f"Не удалось создать клиента в 3x-ui, генерируем тестовый ключ")
     
-    if not success:
-        logger.error(f"Не удалось создать клиента в 3x-ui")
-        # Возвращаем фейковый ключ, если панель недоступна
-        vless_link = generate_vless_link(user_uuid, email)
-        return vless_link, user_uuid, email
-    
-    # Генерируем ссылку для подключения
     vless_link = generate_vless_link(user_uuid, email)
-    
     return vless_link, user_uuid, email
-
-def remove_vpn_user_from_server(client_id: str) -> bool:
-    """Удаление пользователя из 3x-ui"""
-    return xray_api.remove_client(client_id)
 
 # ======================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =======================
 def get_user(user_id: int) -> Optional[Dict]:
@@ -386,16 +305,13 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     start_date = datetime.now()
     end_date = start_date + timedelta(days=plan['days'])
     
-    # Создаем пользователя на сервере
     vpn_key, user_uuid, client_id = create_vpn_user_on_server(user_id, plan_id)
     
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
     
-    # Деактивируем старые подписки
     c.execute("UPDATE subscriptions SET status = 'inactive' WHERE user_id = ? AND status = 'active'", (user_id,))
     
-    # Создаем новую подписку
     c.execute("""INSERT INTO subscriptions 
                  (user_id, plan_id, start_date, end_date, status, price, payment_id, vpn_key, uuid, client_id)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -403,13 +319,11 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     
     subscription_id = c.lastrowid
     
-    # Сохраняем VPN ключ в отдельной таблице
     c.execute("""INSERT INTO vpn_keys 
                  (key, user_id, subscription_id, created_at, expires_at, status, devices, uuid, client_id)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
               (vpn_key, user_id, subscription_id, start_date, end_date, 'active', plan['devices'], user_uuid, client_id))
     
-    # Обновляем пользователя
     c.execute("""UPDATE users 
                  SET current_subscription = ?, subscription_end = ?, devices = ?
                  WHERE user_id = ?""",
@@ -459,6 +373,12 @@ def get_plans_keyboard():
 def get_keys_keyboard():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Обновить ключи", callback_data="refresh_keys")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+    ])
+    return keyboard
+
+def get_back_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     return keyboard
@@ -597,7 +517,6 @@ async def process_plan_selection(callback: CallbackQuery):
     
     user_id = callback.from_user.id
     
-    # Для бесплатного тарифа
     if plan['price'] == 0:
         conn = sqlite3.connect('subscriptions.db')
         c = conn.cursor()
@@ -609,7 +528,6 @@ async def process_plan_selection(callback: CallbackQuery):
             await callback.answer("❌ Вы уже использовали бесплатный период!", show_alert=True)
             return
         
-        # Активируем подписку
         create_subscription(user_id, plan_id, 0)
         
         active_sub = get_active_subscription(user_id)
@@ -640,7 +558,6 @@ async def process_plan_selection(callback: CallbackQuery):
         await callback.answer()
         return
     
-    # Для платных тарифов
     payment_text = f"""
 💳 <b>Оплата подписки</b>
 
@@ -648,13 +565,12 @@ async def process_plan_selection(callback: CallbackQuery):
 Сумма: {plan['price']} ₽
 Период: {plan['days']} дней
 
-После оплаты ключ будет сгенерирован автоматически.
+⚠️ <b>Для тестирования используйте кнопку ниже</b>
 """
     
-    # Кнопка для тестовой активации
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Тестовая активация", callback_data=f"test_activate_{plan_id}")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_plans")]
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     
     await callback.message.edit_text(
@@ -674,7 +590,6 @@ async def test_activate(callback: CallbackQuery):
         await callback.answer("❌ Тариф не найден")
         return
     
-    # Активируем подписку
     try:
         create_subscription(user_id, plan_id, plan['price'], "test_payment")
     except Exception as e:
@@ -697,11 +612,7 @@ async def test_activate(callback: CallbackQuery):
 
 📌 <b>Инструкция по использованию:</b>
 1. Скопируйте ключ полностью
-2. Вставьте в приложение:
-   • V2Ray / V2RayNG
-   • Nekoray
-   • Shadowrocket
-   • Qv2ray
+2. Вставьте в приложение (V2Ray, Nekoray, Shadowrocket)
 3. Подключитесь к серверу
 
 Ключ также доступен в разделе "Мои ключи".
@@ -813,7 +724,6 @@ async def show_help(callback: CallbackQuery):
 
 # ======================= WEBHOOK ОБРАБОТЧИКИ =======================
 async def webhook_handler(request):
-    """Обработка вебхуков от Telegram"""
     try:
         data = await request.json()
         update = types.Update(**data)
@@ -825,7 +735,6 @@ async def webhook_handler(request):
 
 # ======================= ЗАПУСК БОТА =======================
 async def on_startup():
-    """Настройка вебхука при запуске"""
     webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost')}/webhook"
     
     try:
@@ -850,7 +759,6 @@ async def main():
     await site.start()
     
     logger.info(f"Бот запущен на порту {port}")
-    logger.info(f"URL панели: {XRAY_PANEL_URL}")
     
     try:
         await asyncio.Event().wait()
