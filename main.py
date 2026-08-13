@@ -16,10 +16,12 @@ from aiohttp import web
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo"
 
-# Данные 3x-ui панели (из документации API)
+# Данные 3x-ui панели
 XRAY_PANEL_URL = "https://2.26.70.65:55347"
 XRAY_PANEL_PATH = "/mMH522DscvfBbpFwaA"
-XRAY_INBOUND_ID = 2  # Kildear VPN
+XRAY_USERNAME = "fHRTAk9lFz"
+XRAY_PASSWORD = "pM0xjYSy4N"
+XRAY_INBOUND_ID = 2
 XRAY_API_TOKEN = "tlZpRhpGQA54Uyta9p9chp42oymKG8NjoauzprvEqHSHqrye"
 
 # Настройки VPN
@@ -106,20 +108,50 @@ class XrayAPI:
     def __init__(self):
         self.session = requests.Session()
         self.session.verify = False
-        self.token = XRAY_API_TOKEN
         self.base_url = f"{XRAY_PANEL_URL}{XRAY_PANEL_PATH}"
-        logger.info(f"✅ API URL: {self.base_url}")
+        self.logged_in = False
+        self.cookies = None
+        self.login()
+    
+    def login(self) -> bool:
+        """Авторизация через логин/пароль для получения кук"""
+        try:
+            url = f"{self.base_url}/login"
+            data = {
+                "username": XRAY_USERNAME,
+                "password": XRAY_PASSWORD
+            }
+            
+            logger.info(f"📤 Авторизация: {url}")
+            response = self.session.post(url, json=data, timeout=30)
+            
+            logger.info(f"📥 Статус: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"📥 Ответ: {json.dumps(result, indent=2)}")
+                
+                if result.get('success'):
+                    self.cookies = response.cookies.get_dict()
+                    self.logged_in = True
+                    logger.info("✅ Успешная авторизация!")
+                    return True
+                else:
+                    logger.error(f"❌ Ошибка авторизации: {result}")
+                    return False
+            else:
+                logger.error(f"❌ HTTP {response.status_code}: {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return False
     
     def add_client(self, uuid: str, email: str, expiry_time: int) -> bool:
-        """
-        Добавление клиента через API 3x-ui
-        POST /panel/api/inbounds/addClient
-        """
+        """Добавление клиента через API с использованием кук"""
         try:
-            # Правильный эндпоинт из документации
             url = f"{self.base_url}/panel/api/inbounds/addClient"
             
-            # Формат запроса из документации
             payload = {
                 "clients": [{
                     "id": uuid,
@@ -136,16 +168,23 @@ class XrayAPI:
             }
             
             headers = {
-                "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json"
             }
             
             logger.info(f"📤 Создание клиента: {email}")
+            logger.info(f"📤 URL: {url}")
             logger.info(f"📤 Inbound ID: {XRAY_INBOUND_ID}")
             logger.info(f"📤 UUID: {uuid}")
-            logger.info(f"📤 Expiry: {expiry_time}")
+            logger.info(f"📤 Cookies: {self.cookies}")
             
-            response = self.session.post(url, json=payload, headers=headers, timeout=30)
+            # Пробуем отправить с куками
+            response = self.session.post(
+                url, 
+                json=payload, 
+                headers=headers,
+                cookies=self.cookies,
+                timeout=30
+            )
             
             logger.info(f"📥 Статус: {response.status_code}")
             logger.info(f"📥 Ответ: {response.text[:500]}")
@@ -163,9 +202,130 @@ class XrayAPI:
                     logger.info(f"✅ Клиент создан (статус 200)")
                     return True
             else:
-                logger.error(f"❌ HTTP {response.status_code}: {response.text}")
-                return False
+                # Если с куками не работает, пробуем с токеном
+                logger.warning("⚠️ С куками не сработало, пробуем с токеном...")
+                return self.add_client_with_token(uuid, email, expiry_time)
                 
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return False
+    
+    def add_client_with_token(self, uuid: str, email: str, expiry_time: int) -> bool:
+        """Добавление клиента через API с использованием Bearer токена"""
+        try:
+            url = f"{self.base_url}/panel/api/inbounds/addClient"
+            
+            payload = {
+                "clients": [{
+                    "id": uuid,
+                    "email": email,
+                    "flow": "xtls-rprx-vision",
+                    "limitIp": 1,
+                    "totalGB": 0,
+                    "expiryTime": expiry_time,
+                    "enable": True,
+                    "tgId": "",
+                    "subId": ""
+                }],
+                "inboundId": XRAY_INBOUND_ID
+            }
+            
+            headers = {
+                "Authorization": f"Bearer {XRAY_API_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            
+            logger.info(f"📤 Создание клиента с токеном: {email}")
+            
+            response = self.session.post(url, json=payload, headers=headers, timeout=30)
+            
+            logger.info(f"📥 Статус с токеном: {response.status_code}")
+            logger.info(f"📥 Ответ: {response.text[:500]}")
+            
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    if result.get('success'):
+                        logger.info(f"✅ Клиент {email} создан через токен!")
+                        return True
+                except:
+                    logger.info(f"✅ Клиент создан (статус 200)")
+                    return True
+            
+            # Если ни один способ не сработал, пробуем через CSRF
+            logger.warning("⚠️ Обычный способ не сработал, пробуем с CSRF...")
+            return self.add_client_with_csrf(uuid, email, expiry_time)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            return False
+    
+    def add_client_with_csrf(self, uuid: str, email: str, expiry_time: int) -> bool:
+        """Добавление клиента с CSRF токеном"""
+        try:
+            # Получаем CSRF токен
+            csrf_url = f"{self.base_url}/panel/api/csrf-token"
+            response = self.session.get(csrf_url, cookies=self.cookies, timeout=30)
+            
+            csrf_token = None
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    csrf_token = data.get('obj')
+                except:
+                    pass
+            
+            # Если CSRF не получили, пробуем из кук
+            if not csrf_token:
+                csrf_token = self.cookies.get('csrf_token')
+            
+            logger.info(f"📤 CSRF токен: {csrf_token}")
+            
+            url = f"{self.base_url}/panel/api/inbounds/addClient"
+            
+            payload = {
+                "clients": [{
+                    "id": uuid,
+                    "email": email,
+                    "flow": "xtls-rprx-vision",
+                    "limitIp": 1,
+                    "totalGB": 0,
+                    "expiryTime": expiry_time,
+                    "enable": True,
+                    "tgId": "",
+                    "subId": ""
+                }],
+                "inboundId": XRAY_INBOUND_ID
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-CSRF-Token": csrf_token if csrf_token else ""
+            }
+            
+            response = self.session.post(
+                url, 
+                json=payload, 
+                headers=headers,
+                cookies=self.cookies,
+                timeout=30
+            )
+            
+            logger.info(f"📥 Статус с CSRF: {response.status_code}")
+            logger.info(f"📥 Ответ: {response.text[:500]}")
+            
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    if result.get('success'):
+                        logger.info(f"✅ Клиент {email} создан через CSRF!")
+                        return True
+                except:
+                    logger.info(f"✅ Клиент создан (статус 200)")
+                    return True
+            
+            return False
+            
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
             return False
@@ -175,7 +335,6 @@ xray_api = XrayAPI()
 
 # ======================= ГЕНЕРАЦИЯ КЛЮЧА =======================
 def generate_vless_link(uuid: str, email: str) -> str:
-    """Генерация VLESS ключа для Kildear VPN"""
     vless_link = (
         f"vless://{uuid}@"
         f"{VPN_SERVER_IP}:{VPN_SERVER_PORT}"
