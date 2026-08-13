@@ -1,23 +1,17 @@
 import os
-import asyncio
-import json
 import logging
-import uuid
-import aiohttp
+import json
+import sqlite3
 from datetime import datetime, timedelta
-from typing import Optional
-from flask import Flask, request
-
-os.environ["TELEGRAM_BOT_API_URL"] = "https://telegram.dog/bot"
-
-from aiogram import Bot, Dispatcher, types, F
+from typing import Dict, Optional
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.client.default import DefaultBotProperties
+from aiogram import F
+import aiohttp
+import base64
+import hashlib
 
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
@@ -36,515 +30,575 @@ PLANS = {
     "1y": {"days": 365, "price": 899, "devices": 5, "label": "1 год", "emoji": "💎"},
 }
 
-# ======================= ИНИЦИАЛИЗАЦИЯ =======================
+# ======================= НАСТРОЙКА ЛОГГИРОВАНИЯ =======================
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-session = AiohttpSession()
-bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode="HTML"))
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+# ======================= ИНИЦИАЛИЗАЦИЯ БОТА =======================
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-# Хранилище заказов
-user_orders = {}
-user_referrals = {}
-user_free_days = {}
-pending_referral = {}
+# ======================= БАЗА ДАННЫХ =======================
+def init_db():
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    
+    # Таблица пользователей
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (user_id INTEGER PRIMARY KEY, 
+                  username TEXT,
+                  first_name TEXT,
+                  last_name TEXT,
+                  registration_date TIMESTAMP,
+                  current_subscription TEXT,
+                  subscription_end TIMESTAMP,
+                  devices INTEGER DEFAULT 1)''')
+    
+    # Таблица подписок
+    c.execute('''CREATE TABLE IF NOT EXISTS subscriptions
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  plan_id TEXT,
+                  start_date TIMESTAMP,
+                  end_date TIMESTAMP,
+                  status TEXT,
+                  price INTEGER,
+                  payment_id TEXT,
+                  FOREIGN KEY (user_id) REFERENCES users (user_id))''')
+    
+    # Таблица платежей
+    c.execute('''CREATE TABLE IF NOT EXISTS payments
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  payment_id TEXT UNIQUE,
+                  user_id INTEGER,
+                  plan_id TEXT,
+                  amount INTEGER,
+                  status TEXT,
+                  created_at TIMESTAMP,
+                  paid_at TIMESTAMP,
+                  FOREIGN KEY (user_id) REFERENCES users (user_id))''')
+    
+    conn.commit()
+    conn.close()
 
-class OrderState(StatesGroup):
-    waiting_for_payment = State()
+init_db()
 
-# ======================= КЛАВИАТУРА =======================
+# ======================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =======================
+def get_user(user_id: int) -> Optional[Dict]:
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    user = c.fetchone()
+    conn.close()
+    
+    if user:
+        return {
+            'user_id': user[0],
+            'username': user[1],
+            'first_name': user[2],
+            'last_name': user[3],
+            'registration_date': user[4],
+            'current_subscription': user[5],
+            'subscription_end': user[6],
+            'devices': user[7]
+        }
+    return None
+
+def create_user(user_id: int, username: str, first_name: str, last_name: str = None):
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    c.execute("""INSERT OR IGNORE INTO users 
+                 (user_id, username, first_name, last_name, registration_date, devices) 
+                 VALUES (?, ?, ?, ?, ?, ?)""",
+              (user_id, username, first_name, last_name, datetime.now(), 1))
+    conn.commit()
+    conn.close()
+
+def get_active_subscription(user_id: int) -> Optional[Dict]:
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    c.execute("""SELECT * FROM subscriptions 
+                 WHERE user_id = ? AND status = 'active' AND end_date > datetime('now')
+                 ORDER BY end_date DESC LIMIT 1""", (user_id,))
+    sub = c.fetchone()
+    conn.close()
+    
+    if sub:
+        return {
+            'id': sub[0],
+            'user_id': sub[1],
+            'plan_id': sub[2],
+            'start_date': sub[3],
+            'end_date': sub[4],
+            'status': sub[5],
+            'price': sub[6],
+            'payment_id': sub[7]
+        }
+    return None
+
+def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str = None):
+    plan = PLANS[plan_id]
+    start_date = datetime.now()
+    end_date = start_date + timedelta(days=plan['days'])
+    
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    
+    # Деактивируем старые подписки
+    c.execute("UPDATE subscriptions SET status = 'inactive' WHERE user_id = ? AND status = 'active'", (user_id,))
+    
+    # Создаем новую подписку
+    c.execute("""INSERT INTO subscriptions 
+                 (user_id, plan_id, start_date, end_date, status, price, payment_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
+              (user_id, plan_id, start_date, end_date, 'active', price, payment_id))
+    
+    # Обновляем пользователя
+    c.execute("""UPDATE users 
+                 SET current_subscription = ?, subscription_end = ?, devices = ?
+                 WHERE user_id = ?""",
+              (plan_id, end_date, plan['devices'], user_id))
+    
+    conn.commit()
+    conn.close()
+
+def create_payment(user_id: int, plan_id: str, amount: int, payment_id: str):
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    c.execute("""INSERT INTO payments 
+                 (payment_id, user_id, plan_id, amount, status, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)""",
+              (payment_id, user_id, plan_id, amount, 'pending', datetime.now()))
+    conn.commit()
+    conn.close()
+
+def update_payment_status(payment_id: str, status: str):
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    c.execute("""UPDATE payments 
+                 SET status = ?, paid_at = ?
+                 WHERE payment_id = ?""",
+              (status, datetime.now() if status == 'succeeded' else None, payment_id))
+    conn.commit()
+    conn.close()
+
+# ======================= КЛАВИАТУРЫ =======================
+def get_main_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Купить подписку", callback_data="buy_subscription")],
+        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile")],
+        [InlineKeyboardButton(text="🆘 Помощь", callback_data="help")]
+    ])
+    return keyboard
+
 def get_plans_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=f"{PLANS['2d']['emoji']} {PLANS['2d']['label']}",
-                callback_data="plan_2d"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"{PLANS['1m']['emoji']} {PLANS['1m']['label']} — {PLANS['1m']['price']} ₽",
-                callback_data="plan_1m"
-            ),
-            InlineKeyboardButton(
-                text=f"{PLANS['3m']['emoji']} {PLANS['3m']['label']} — {PLANS['3m']['price']} ₽",
-                callback_data="plan_3m"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"{PLANS['1y']['emoji']} {PLANS['1y']['label']} — {PLANS['1y']['price']} ₽",
-                callback_data="plan_1y"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="👥 Реферальная программа",
-                callback_data="referral_info"
-            )
-        ]
-    ])
-    return keyboard
-
-def get_payment_keyboard(payment_url_card: str, payment_url_sbp: str = None):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Оплатить картой", url=payment_url_card)]
-    ])
-    if payment_url_sbp:
-        keyboard.inline_keyboard.append(
-            [InlineKeyboardButton(text="📱 Оплатить через СБП", url=payment_url_sbp)]
-        )
-    keyboard.inline_keyboard.append(
-        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_payment")]
-    )
-    keyboard.inline_keyboard.append(
-        [InlineKeyboardButton(text="❌ Отменить заказ", callback_data="cancel_order")]
-    )
-    return keyboard
-
-def get_referral_keyboard(ref_code: str):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="🔗 Скопировать ссылку",
-                callback_data=f"copy_ref_{ref_code}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="📊 Мои приглашения",
-                callback_data="my_refs"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="⬅️ Назад",
-                callback_data="back_to_menu"
-            )
-        ]
-    ])
-    return keyboard
-
-# ======================= ГЕНЕРАЦИЯ VPN-КЛЮЧА =======================
-def generate_vpn_key(telegram_id: int, days: int) -> tuple:
-    """Генерирует уникальный ключ и сохраняет его"""
-    client_uuid = str(uuid.uuid4())
-    username = f"user_{telegram_id}_{int(datetime.now().timestamp())}"
-    expiry_date = datetime.now() + timedelta(days=days)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     
-    vless_link = f"vless://{client_uuid}@2.26.70.65:40224?type=ws&encryption=none&path=%2Fvpn&host=&security=none#{username}"
+    for plan_id, plan in PLANS.items():
+        price_text = f"{plan['price']} ₽" if plan['price'] > 0 else "Бесплатно"
+        button_text = f"{plan['emoji']} {plan['label']} — {price_text}"
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text=button_text, callback_data=f"plan_{plan_id}")
+        ])
     
-    return vless_link, username, expiry_date
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
+    ])
+    
+    return keyboard
 
-# ======================= ЮKASSA =======================
-async def create_yookassa_invoice(amount: float, description: str, order_id: str, payment_method: str = "bank_card") -> tuple:
-    idempotence_key = str(uuid.uuid4())
+def get_payment_keyboard(payment_id: str, confirmation_url: str):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Оплатить", url=confirmation_url)],
+        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment_{payment_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_plans")]
+    ])
+    return keyboard
 
-    if payment_method == "sbp":
-        payment_method_data = {"type": "sbp"}
-    else:
-        payment_method_data = {"type": "bank_card"}
-
-    payload = {
-        "amount": {"value": str(amount), "currency": "RUB"},
-        "payment_method_data": payment_method_data,
-        "confirmation": {"type": "redirect", "return_url": "https://t.me/kildear_vpn_bot"},
-        "description": description,
-        "metadata": {"order_id": order_id, "telegram_id": order_id.split('_')[0]},
-        "capture": True
-    }
-
-    auth = aiohttp.BasicAuth(YKASSA_SHOP_ID, YKASSA_SECRET_KEY)
-    headers = {"Content-Type": "application/json", "Idempotence-Key": idempotence_key}
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(YKASSA_API_URL, json=payload, headers=headers, auth=auth) as resp:
-                data = await resp.json()
-                logging.info(f"Ответ ЮKassa: {data}")
-                if data.get("status") in ["pending", "waiting_for_capture"]:
-                    return data["confirmation"]["confirmation_url"], data["id"]
-                else:
-                    return None, None
-        except Exception as e:
-            logging.error(f"Ошибка ЮKassa: {e}")
-            return None, None
-
-async def check_yookassa_payment(payment_id: str) -> str:
-    auth = aiohttp.BasicAuth(YKASSA_SHOP_ID, YKASSA_SECRET_KEY)
-    check_url = f"{YKASSA_API_URL}/{payment_id}"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(check_url, auth=auth) as resp:
-                data = await resp.json()
-                return data.get("status")
-        except Exception as e:
-            return None
-
-# ======================= РЕФЕРАЛЬНАЯ СИСТЕМА =======================
-def generate_ref_code(user_id: int) -> str:
-    import hashlib
-    return hashlib.md5(f"{user_id}_{datetime.now().timestamp()}".encode()).hexdigest()[:8]
-
-def get_or_create_ref_data(user_id: int):
-    if user_id not in user_referrals:
-        user_referrals[user_id] = {"ref_code": generate_ref_code(user_id), "refs": []}
-        user_free_days[user_id] = 0
-    return user_referrals[user_id]
-
-async def add_free_days(user_id: int, days: int):
-    if user_id not in user_free_days:
-        user_free_days[user_id] = 0
-    user_free_days[user_id] += days
-
-async def process_referral(new_user_id: int, ref_code: str):
-    inviter_id = None
-    for uid, data in user_referrals.items():
-        if data["ref_code"] == ref_code:
-            inviter_id = uid
-            break
-    if not inviter_id or inviter_id == new_user_id:
-        return
-    if new_user_id in user_referrals[inviter_id]["refs"]:
-        return
-    pending_referral[new_user_id] = inviter_id
-
-async def activate_referral(user_id: int):
-    if user_id not in pending_referral:
-        return
-    inviter_id = pending_referral[user_id]
-    if inviter_id not in user_referrals:
-        return
-    if user_id not in user_referrals[inviter_id]["refs"]:
-        user_referrals[inviter_id]["refs"].append(user_id)
-        await add_free_days(inviter_id, 7)
-        await bot.send_message(
-            chat_id=inviter_id,
-            text=f"🎉 <b>Ваш друг купил подписку!</b>\n\n"
-                 f"Вы получили <b>7 дней</b> бесплатной подписки.\n"
-                 f"Всего бесплатных дней: <b>{user_free_days.get(inviter_id, 0)}</b>",
-            parse_mode="HTML"
-        )
-    del pending_referral[user_id]
-
-# ======================= ОБРАБОТЧИКИ =======================
+# ======================= ОБРАБОТЧИКИ КОМАНД =======================
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
-    args = message.text.split()
+async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    if len(args) > 1 and args[1].startswith("ref_"):
-        ref_code = args[1].replace("ref_", "")
-        await process_referral(user_id, ref_code)
-    get_or_create_ref_data(user_id)
+    
+    # Регистрируем пользователя
+    create_user(
+        user_id,
+        message.from_user.username,
+        message.from_user.first_name,
+        message.from_user.last_name
+    )
+    
+    # Приветственное сообщение
+    welcome_text = f"""
+🌟 <b>Добро пожаловать в VPN сервис Kildear!</b>
+
+Защитите свои данные и получите доступ к любому контенту.
+
+📋 <b>Доступные тарифы:</b>
+• 🎁 2 дня бесплатно
+• 🔥 1 месяц — 139 ₽
+• ⭐ 3 месяца — 469 ₽
+• 💎 1 год — 899 ₽
+
+Используйте кнопки ниже для управления подпиской.
+"""
+    
     await message.answer(
-        "🛡️ <b>Добро пожаловать в Kildear VPN!</b>\n\n"
-        "👇 <b>Выберите тариф:</b>",
+        welcome_text,
+        reply_markup=get_main_keyboard(),
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🏠 <b>Главное меню</b>\n\nВыберите действие:",
+        reply_markup=get_main_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "buy_subscription")
+async def show_plans(callback: CallbackQuery):
+    # Проверяем активную подписку
+    active_sub = get_active_subscription(callback.from_user.id)
+    
+    plans_text = "📱 <b>Выберите тарифный план:</b>\n\n"
+    
+    if active_sub:
+        end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
+        days_left = (end_date - datetime.now()).days
+        plans_text += f"✅ <i>У вас активна подписка до {end_date.strftime('%d.%m.%Y')} (осталось {days_left} дней)</i>\n\n"
+    
+    for plan_id, plan in PLANS.items():
+        price_text = f"{plan['price']} ₽" if plan['price'] > 0 else "Бесплатно"
+        plans_text += f"{plan['emoji']} <b>{plan['label']}</b>\n"
+        plans_text += f"   • 📅 {plan['days']} дней\n"
+        plans_text += f"   • 📱 {plan['devices']} устройств\n"
+        plans_text += f"   • 💰 {price_text}\n\n"
+    
+    await callback.message.edit_text(
+        plans_text,
         reply_markup=get_plans_keyboard(),
         parse_mode="HTML"
     )
-
-@dp.message(Command("docs"))
-async def cmd_docs(message: Message):
-    await message.answer(
-        "📄 <b>Документы Kildear VPN</b>\n\n"
-        "Политика конфиденциальности: https://kildear-vpn-atst.onrender.com/privacy\n"
-        "Пользовательское соглашение: https://kildear-vpn-atst.onrender.com/terms\n\n"
-        "📧 Контакты: kildearVPN@yandex.ru",
-        parse_mode="HTML"
-    )
-
-@dp.message(Command("ref"))
-async def cmd_ref(message: Message):
-    user_id = message.from_user.id
-    data = get_or_create_ref_data(user_id)
-    ref_code = data["ref_code"]
-    refs_count = len(data["refs"])
-    free_days = user_free_days.get(user_id, 0)
-    await message.answer(
-        f"👥 <b>Ваша реферальная ссылка</b>\n\n"
-        f"🔗 <code>https://t.me/kildear_vpn_bot?start=ref_{ref_code}</code>\n\n"
-        f"📊 Приглашено друзей: <b>{refs_count}</b>\n"
-        f"🎁 Бесплатных дней накоплено: <b>{free_days}</b>",
-        parse_mode="HTML"
-    )
-
-# ======================= ОБРАБОТЧИКИ КНОПОК =======================
-@dp.callback_query(F.data == "referral_info")
-async def referral_info(callback: CallbackQuery):
     await callback.answer()
-    user_id = callback.from_user.id
-    data = get_or_create_ref_data(user_id)
-    ref_code = data["ref_code"]
-    refs_count = len(data["refs"])
-    free_days = user_free_days.get(user_id, 0)
-    await callback.message.edit_text(
-        f"👥 <b>Реферальная программа</b>\n\n"
-        f"🔗 <code>https://t.me/kildear_vpn_bot?start=ref_{ref_code}</code>\n\n"
-        f"📊 Приглашено друзей: <b>{refs_count}</b>\n"
-        f"🎁 Бесплатных дней накоплено: <b>{free_days}</b>",
-        reply_markup=get_referral_keyboard(ref_code),
-        parse_mode="HTML"
-    )
-
-@dp.callback_query(F.data == "my_refs")
-async def my_refs(callback: CallbackQuery):
-    await callback.answer()
-    user_id = callback.from_user.id
-    data = get_or_create_ref_data(user_id)
-    refs_count = len(data["refs"])
-    free_days = user_free_days.get(user_id, 0)
-    await callback.message.edit_text(
-        f"📊 <b>Мои приглашения</b>\n\n"
-        f"Приглашено друзей: <b>{refs_count}</b>\n"
-        f"Бесплатных дней накоплено: <b>{free_days}</b>",
-        reply_markup=get_referral_keyboard(data["ref_code"]),
-        parse_mode="HTML"
-    )
-
-@dp.callback_query(F.data == "back_to_menu")
-async def back_to_menu(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.edit_text(
-        "🛡️ <b>Добро пожаловать в Kildear VPN!</b>\n\n"
-        "👇 <b>Выберите тариф:</b>",
-        reply_markup=get_plans_keyboard(),
-        parse_mode="HTML"
-    )
-
-@dp.callback_query(F.data.startswith("copy_ref_"))
-async def copy_ref(callback: CallbackQuery):
-    await callback.answer("Ссылка скопирована!", show_alert=True)
 
 @dp.callback_query(F.data.startswith("plan_"))
-async def process_plan_selection(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-
-    plan_key = callback.data.replace("plan_", "")
-    if plan_key not in PLANS:
-        await callback.message.answer("❌ Такого тарифа не существует.")
+async def process_plan_selection(callback: CallbackQuery):
+    plan_id = callback.data.replace("plan_", "")
+    plan = PLANS.get(plan_id)
+    
+    if not plan:
+        await callback.answer("❌ Тариф не найден")
         return
-
-    plan = PLANS[plan_key]
+    
     user_id = callback.from_user.id
-    order_id = f"{user_id}_{int(datetime.now().timestamp())}"
-
-    # ===== БЕСПЛАТНЫЙ ТАРИФ =====
-    if plan["price"] == 0:
-        # Проверяем, есть ли накопленные бесплатные дни
-        free_days = user_free_days.get(user_id, 0)
-        if free_days > 0:
-            await callback.message.answer(
-                f"🎁 <b>У вас есть {free_days} бесплатных дней!</b>\n\n"
-                f"Хотите активировать их сейчас?",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=f"✅ Активировать {free_days} дней", callback_data="activate_free_days")],
-                    [InlineKeyboardButton(text="🎁 Использовать тестовый 2 дня", callback_data="use_test_2d")]
-                ]),
-                parse_mode="HTML"
-            )
+    
+    # Если бесплатный тариф - активируем сразу
+    if plan['price'] == 0:
+        # Проверяем, не использовал ли уже пользователь бесплатный период
+        conn = sqlite3.connect('subscriptions.db')
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND plan_id = '2d'", (user_id,))
+        count = c.fetchone()[0]
+        conn.close()
+        
+        if count > 0:
+            await callback.answer("❌ Вы уже использовали бесплатный период!", show_alert=True)
             return
-
-        # Выдаём тестовый ключ
-        await callback.message.answer("🎁 <b>Тестовый доступ на 2 дня!</b>", parse_mode="HTML")
-        vless_link, username, expiry_date = generate_vpn_key(user_id, plan["days"])
-        await callback.message.answer(
-            f"✅ <b>VPN-ключ готов!</b>\n\n"
-            f"🔗 <b>Ссылка:</b>\n<code>{vless_link}</code>\n\n"
-            f"📅 Подписка до: {expiry_date.strftime('%d.%m.%Y')}",
-            reply_markup=get_plans_keyboard(),
+        
+        # Активируем бесплатную подписку
+        create_subscription(user_id, plan_id, 0)
+        
+        await callback.message.edit_text(
+            f"🎉 <b>Поздравляем! Бесплатная подписка активирована!</b>\n\n"
+            f"📅 Период: {plan['days']} дней\n"
+            f"📱 Устройств: {plan['devices']}\n\n"
+            f"Наслаждайтесь безопасным интернетом! 🔒",
+            reply_markup=get_main_keyboard(),
             parse_mode="HTML"
         )
+        await callback.answer()
         return
+    
+    # Создаем платеж в ЮKassa
+    try:
+        payment_data = await create_yookassa_payment(
+            user_id=user_id,
+            plan_id=plan_id,
+            amount=plan['price']
+        )
+        
+        # Сохраняем платеж в БД
+        create_payment(user_id, plan_id, plan['price'], payment_data['id'])
+        
+        # Показываем пользователю
+        payment_text = f"""
+💳 <b>Оплата подписки</b>
 
-    # ===== ПЛАТНЫЙ ТАРИФ =====
-    await callback.message.answer(
-        f"⏳ Создаю счёт для оплаты...\n"
-        f"Тариф: {plan['label']}\n"
-        f"Стоимость: {plan['price']} ₽",
-        parse_mode="HTML"
-    )
+Тариф: {plan['label']}
+Сумма: {plan['price']} ₽
+Период: {plan['days']} дней
 
-    # Создаём платеж
-    payment_url_card, payment_id_card = await create_yookassa_invoice(
-        amount=plan["price"],
-        description=f"Kildear VPN — {plan['label']}",
-        order_id=order_id,
-        payment_method="bank_card"
-    )
-
-    payment_url_sbp, payment_id_sbp = await create_yookassa_invoice(
-        amount=plan["price"],
-        description=f"Kildear VPN — {plan['label']} (СБП)",
-        order_id=order_id,
-        payment_method="sbp"
-    )
-
-    if not payment_url_card:
-        await callback.message.answer("❌ Ошибка при создании счёта. Попробуйте позже.")
-        return
-
-    # Сохраняем заказ
-    user_orders[user_id] = {
-        "order_id": order_id,
-        "payment_id": payment_id_card,
-        "payment_id_sbp": payment_id_sbp,
-        "plan": plan_key,
-        "days": plan["days"],
-        "price": plan["price"],
-        "status": "pending"
-    }
-
-    await state.set_state(OrderState.waiting_for_payment)
-
-    await callback.message.answer(
-        f"💳 <b>Оплата через ЮKassa</b>\n\n"
-        f"Тариф: {plan['label']}\n"
-        f"Стоимость: {plan['price']} ₽\n\n"
-        f"Выберите способ оплаты:",
-        reply_markup=get_payment_keyboard(payment_url_card, payment_url_sbp),
-        parse_mode="HTML"
-    )
-
-# ======================= АКТИВАЦИЯ БЕСПЛАТНЫХ ДНЕЙ =======================
-@dp.callback_query(F.data == "activate_free_days")
-async def activate_free_days(callback: CallbackQuery):
-    await callback.answer()
-    user_id = callback.from_user.id
-    free_days = user_free_days.get(user_id, 0)
-
-    if free_days <= 0:
-        await callback.message.answer("❌ У вас нет накопленных бесплатных дней.")
-        return
-
-    vless_link, username, expiry_date = generate_vpn_key(user_id, free_days)
-    user_free_days[user_id] = 0
-
-    await callback.message.answer(
-        f"✅ <b>Бесплатные дни активированы!</b>\n\n"
-        f"🔗 <b>Ссылка:</b>\n<code>{vless_link}</code>\n\n"
-        f"📅 Подписка до: {expiry_date.strftime('%d.%m.%Y')}",
-        reply_markup=get_plans_keyboard(),
-        parse_mode="HTML"
-    )
-
-@dp.callback_query(F.data == "use_test_2d")
-async def use_test_2d(callback: CallbackQuery):
-    await callback.answer()
-    user_id = callback.from_user.id
-
-    vless_link, username, expiry_date = generate_vpn_key(user_id, 2)
-
-    await callback.message.answer(
-        f"🎁 <b>Тестовый доступ на 2 дня!</b>\n\n"
-        f"✅ <b>VPN-ключ готов!</b>\n\n"
-        f"🔗 <b>Ссылка:</b>\n<code>{vless_link}</code>\n\n"
-        f"📅 Подписка до: {expiry_date.strftime('%d.%m.%Y')}",
-        reply_markup=get_plans_keyboard(),
-        parse_mode="HTML"
-    )
-
-# ======================= ПРОВЕРКА / ОТМЕНА =======================
-@dp.callback_query(F.data == "check_payment")
-async def check_payment(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    user_id = callback.from_user.id
-
-    if user_id not in user_orders:
-        await callback.message.answer("❌ Сначала выберите тариф.")
-        return
-
-    order = user_orders[user_id]
-    if order["status"] == "paid":
-        await callback.message.answer("✅ Этот заказ уже оплачен!")
-        return
-
-    # Проверяем статус платежа
-    status = await check_yookassa_payment(order["payment_id"])
-    if status not in ["succeeded", "waiting_for_capture"] and order.get("payment_id_sbp"):
-        status = await check_yookassa_payment(order["payment_id_sbp"])
-
-    if status in ["succeeded", "waiting_for_capture"]:
-        order["status"] = "paid"
-        await callback.message.answer("⏳ Оплата подтверждена! Создаю VPN-ключ...")
-
-        # Генерируем ключ
-        vless_link, username, expiry_date = generate_vpn_key(user_id, order["days"])
-
-        await callback.message.answer(
-            f"✅ <b>VPN-ключ готов!</b>\n\n"
-            f"🔗 <b>Ссылка:</b>\n<code>{vless_link}</code>\n\n"
-            f"📅 Подписка до: {expiry_date.strftime('%d.%m.%Y')}",
+Нажмите на кнопку ниже для оплаты.
+После оплаты нажмите "Проверить оплату".
+"""
+        
+        await callback.message.edit_text(
+            payment_text,
+            reply_markup=get_payment_keyboard(payment_data['id'], payment_data['confirmation_url']),
             parse_mode="HTML"
         )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при создании платежа: {e}")
+        await callback.message.edit_text(
+            "❌ <b>Ошибка при создании платежа</b>\n\nПожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard(),
+            parse_mode="HTML"
+        )
+    
+    await callback.answer()
 
-        await activate_referral(user_id)
-        del user_orders[user_id]
+@dp.callback_query(F.data.startswith("check_payment_"))
+async def check_payment_status(callback: CallbackQuery):
+    payment_id = callback.data.replace("check_payment_", "")
+    user_id = callback.from_user.id
+    
+    try:
+        status = await check_yookassa_payment(payment_id)
+        
+        if status == 'succeeded':
+            # Получаем информацию о платеже из БД
+            conn = sqlite3.connect('subscriptions.db')
+            c = conn.cursor()
+            c.execute("SELECT plan_id, amount FROM payments WHERE payment_id = ?", (payment_id,))
+            payment_info = c.fetchone()
+            conn.close()
+            
+            if payment_info:
+                plan_id = payment_info[0]
+                update_payment_status(payment_id, 'succeeded')
+                create_subscription(user_id, plan_id, payment_info[1], payment_id)
+                
+                plan = PLANS[plan_id]
+                await callback.message.edit_text(
+                    f"✅ <b>Оплата прошла успешно!</b>\n\n"
+                    f"🎉 Подписка на тариф «{plan['label']}» активирована!\n"
+                    f"📅 Период: {plan['days']} дней\n"
+                    f"📱 Устройств: {plan['devices']}\n\n"
+                    f"Спасибо за покупку! 🔒",
+                    reply_markup=get_main_keyboard(),
+                    parse_mode="HTML"
+                )
+            else:
+                await callback.answer("❌ Платеж не найден", show_alert=True)
+        elif status == 'pending':
+            await callback.answer("⏳ Платеж еще не обработан. Попробуйте позже.", show_alert=True)
+        else:
+            await callback.answer("❌ Платеж не прошел. Попробуйте снова.", show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"Ошибка при проверке платежа: {e}")
+        await callback.answer("❌ Ошибка при проверке платежа", show_alert=True)
+
+@dp.callback_query(F.data == "my_profile")
+async def show_profile(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = get_user(user_id)
+    active_sub = get_active_subscription(user_id)
+    
+    profile_text = f"""
+👤 <b>Ваш профиль</b>
+
+🆔 ID: {user['user_id']}
+📝 Имя: {user['first_name']}
+"""
+    
+    if user['username']:
+        profile_text += f"@ {user['username']}\n"
+    
+    if active_sub:
+        end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
+        days_left = (end_date - datetime.now()).days
+        plan = PLANS.get(active_sub['plan_id'], {})
+        
+        profile_text += f"""
+📱 <b>Текущая подписка</b>
+• Тариф: {plan.get('label', active_sub['plan_id'])}
+• Действует до: {end_date.strftime('%d.%m.%Y')}
+• Осталось дней: {days_left if days_left > 0 else 0}
+• Устройств: {plan.get('devices', 1)}
+"""
     else:
-        await callback.message.answer(
-            "⏳ Платёж ещё не проведён.\n"
-            "Если уже оплатили, подождите 1-2 минуты и нажмите «Проверить оплату» снова."
-        )
+        profile_text += "\n❌ <b>Нет активной подписки</b>"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="buy_subscription")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+    ])
+    
+    await callback.message.edit_text(
+        profile_text,
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
-@dp.callback_query(F.data == "cancel_order")
-async def cancel_order(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    if user_id in user_orders:
-        del user_orders[user_id]
-    await state.clear()
-    await callback.answer("Заказ отменён")
-    await callback.message.edit_text("❌ Заказ отменён.", reply_markup=get_plans_keyboard())
+@dp.callback_query(F.data == "help")
+async def show_help(callback: CallbackQuery):
+    help_text = """
+🆘 <b>Помощь</b>
 
-# ======================= ВЕБХУК =======================
-app = Flask(__name__)
+<b>Как купить подписку?</b>
+1. Нажмите "📱 Купить подписку"
+2. Выберите тариф
+3. Оплатите через ЮKassa
 
-@app.route('/webhook/yookassa', methods=['POST'])
-def yookassa_webhook():
-    data = request.json
-    if data.get("event") in ["payment.succeeded", "payment.waiting_for_capture"]:
-        payment_data = data.get("object", {})
-        order_id = payment_data.get("metadata", {}).get("order_id")
-        if not order_id:
-            return "No order_id", 400
-        try:
-            user_id = int(order_id.split('_')[0])
-        except:
-            return "Invalid order_id", 400
-        if user_id not in user_orders:
-            return "Order not found", 404
-        order = user_orders[user_id]
-        if order["status"] == "paid":
-            return "Already paid", 200
-        order["status"] = "paid"
+<b>Бесплатный период</b>
+Вы можете получить 2 дня бесплатно, чтобы протестировать сервис.
 
-        # Генерируем ключ
-        vless_link, username, expiry_date = asyncio.run(generate_vpn_key(user_id, order["days"]))
+<b>Вопросы и поддержка</b>
+Если у вас возникли проблемы, напишите нам:
+📧 support@kildear.com
 
-        asyncio.run(bot.send_message(
-            chat_id=user_id,
-            text=f"✅ <b>Оплата подтверждена!</b>\n\n"
-                 f"🔗 <b>Ваш VPN-ключ:</b>\n<code>{vless_link}</code>\n\n"
-                 f"📅 Подписка до: {expiry_date.strftime('%d.%m.%Y')}",
-            parse_mode="HTML"
-        ))
-        asyncio.run(activate_referral(user_id))
-        del user_orders[user_id]
-        return "OK", 200
-    return "OK", 200
+<b>Важно:</b>
+• После оплаты подписка активируется автоматически
+• Подписка продлевается по истечении срока
+• VPN работает на всех устройствах
+"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+    ])
+    
+    await callback.message.edit_text(
+        help_text,
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
-@app.route('/', methods=['GET'])
-def index():
-    return "Бот Kildear VPN работает!"
+# ======================= ФУНКЦИИ ДЛЯ РАБОТЫ С ЮKASSA =======================
+async def create_yookassa_payment(user_id: int, plan_id: str, amount: int) -> Dict:
+    """Создание платежа в ЮKassa"""
+    idempotence_key = hashlib.md5(f"{user_id}_{plan_id}_{datetime.now().timestamp()}".encode()).hexdigest()
+    
+    payment_data = {
+        "amount": {
+            "value": f"{amount}.00",
+            "currency": "RUB"
+        },
+        "confirmation": {
+            "type": "redirect",
+            "return_url": YKASSA_WEBHOOK_URL
+        },
+        "capture": True,
+        "description": f"Подписка VPN {plan_id} для пользователя {user_id}",
+        "metadata": {
+            "user_id": str(user_id),
+            "plan_id": plan_id
+        }
+    }
+    
+    auth = base64.b64encode(f"{YKASSA_SHOP_ID}:{YKASSA_SECRET_KEY}".encode()).decode()
+    headers = {
+        "Content-Type": "application/json",
+        "Idempotence-Key": idempotence_key,
+        "Authorization": f"Basic {auth}"
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(YKASSA_API_URL, json=payment_data, headers=headers) as response:
+            if response.status == 200:
+                data = await response.json()
+                return {
+                    'id': data['id'],
+                    'confirmation_url': data['confirmation']['confirmation_url']
+                }
+            else:
+                error_text = await response.text()
+                logger.error(f"Ошибка ЮKassa: {response.status} - {error_text}")
+                raise Exception(f"Ошибка создания платежа: {response.status}")
 
-# ======================= ЗАПУСК =======================
+async def check_yookassa_payment(payment_id: str) -> str:
+    """Проверка статуса платежа"""
+    auth = base64.b64encode(f"{YKASSA_SHOP_ID}:{YKASSA_SECRET_KEY}".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {auth}"
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{YKASSA_API_URL}/{payment_id}", headers=headers) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data.get('status', 'unknown')
+            else:
+                error_text = await response.text()
+                logger.error(f"Ошибка проверки платежа: {response.status} - {error_text}")
+                return 'error'
+
+# ======================= WEBHOOK ДЛЯ ЮKASSA =======================
+from aiohttp import web
+
+async def yookassa_webhook(request):
+    """Обработка вебхуков от ЮKassa"""
+    try:
+        data = await request.json()
+        logger.info(f"Получен вебхук: {data}")
+        
+        event = data.get('event')
+        payment_data = data.get('object', {})
+        payment_id = payment_data.get('id')
+        status = payment_data.get('status')
+        
+        if event == 'payment.succeeded':
+            # Обновляем статус платежа
+            update_payment_status(payment_id, 'succeeded')
+            
+            # Получаем информацию о платеже
+            conn = sqlite3.connect('subscriptions.db')
+            c = conn.cursor()
+            c.execute("SELECT user_id, plan_id, amount FROM payments WHERE payment_id = ?", (payment_id,))
+            payment_info = c.fetchone()
+            conn.close()
+            
+            if payment_info:
+                user_id, plan_id, amount = payment_info
+                create_subscription(user_id, plan_id, amount, payment_id)
+                
+                # Отправляем уведомление пользователю
+                try:
+                    plan = PLANS[plan_id]
+                    await bot.send_message(
+                        user_id,
+                        f"✅ <b>Оплата прошла успешно!</b>\n\n"
+                        f"🎉 Подписка на тариф «{plan['label']}» активирована!\n"
+                        f"📅 Период: {plan['days']} дней\n"
+                        f"📱 Устройств: {plan['devices']}\n\n"
+                        f"Спасибо за покупку! 🔒",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось отправить уведомление пользователю: {e}")
+        
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"Ошибка в вебхуке: {e}")
+        return web.Response(status=500)
+
+# ======================= ЗАПУСК БОТА =======================
 async def main():
+    # Настройка вебхука для ЮKassa (если нужно)
+    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import threading
-    flask_thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
-    )
-    flask_thread.daemon = True
-    flask_thread.start()
+    # Запускаем веб-сервер для вебхуков (опционально)
+    # app = web.Application()
+    # app.router.add_post('/webhook/yookassa', yookassa_webhook)
+    # web.run_app(app, host='0.0.0.0', port=8080)
+    
+    # Или запускаем бота с поллингом
     asyncio.run(main())
