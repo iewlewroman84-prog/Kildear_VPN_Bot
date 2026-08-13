@@ -20,21 +20,23 @@ from aiohttp import web
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
 
-# Настройки 3x-ui панели (из ваших данных)
+# Настройки 3x-ui панели
 XRAY_PANEL_URL = os.environ.get("XRAY_PANEL_URL", "https://2.26.70.65:55347")
 XRAY_PANEL_PATH = os.environ.get("XRAY_PANEL_PATH", "/mMH522DscvfBbpFwaA")
 XRAY_USERNAME = os.environ.get("XRAY_USERNAME", "fHRTAk9lFz")
 XRAY_PASSWORD = os.environ.get("XRAY_PASSWORD", "pM0xjYSy4N")
-XRAY_INBOUND_ID = os.environ.get("XRAY_INBOUND_ID", "2")  # Используем ID 2 для подписки
+XRAY_INBOUND_ID = os.environ.get("XRAY_INBOUND_ID", "2")  # Kildear VPN
 XRAY_API_TOKEN = os.environ.get("XRAY_API_TOKEN", "tlZpRhpGQA54Uyta9p9chp42oymKG8NjoauzprvEqHSHqrye")
+
+# Настройки VPN сервера (из панели Kildear VPN)
+VPN_SERVER_IP = os.environ.get("VPN_SERVER_IP", "2.26.70.65")
+VPN_SERVER_PORT = os.environ.get("VPN_SERVER_PORT", "40224")  # Порт из inbound Kildear VPN
+VPN_DOMAIN = os.environ.get("VPN_DOMAIN", "2.26.70.65")
+VPN_PATH = os.environ.get("VPN_PATH", "/mMH522DscvfBbpFwaA")  # Path из панели
 
 # Настройки подписки
 SUBSCRIPTION_PATH = os.environ.get("SUBSCRIPTION_PATH", "/sub/mc3psfn9f3t39r2x")
 SUBSCRIPTION_URL = f"https://2.26.70.65:2096{SUBSCRIPTION_PATH}"
-
-# Настройки VPN сервера
-VPN_SERVER_IP = os.environ.get("VPN_SERVER_IP", "2.26.70.65")
-VPN_DOMAIN = os.environ.get("VPN_DOMAIN", "2.26.70.65")
 
 # Настройки ЮKassa
 YKASSA_SHOP_ID = os.environ.get("YKASSA_SHOP_ID", "1434221")
@@ -123,7 +125,7 @@ def init_db():
 
 init_db()
 
-# ======================= ИНТЕГРАЦИЯ С 3X-UI ЧЕРЕЗ API =======================
+# ======================= ИНТЕГРАЦИЯ С 3X-UI =======================
 class XrayPanelAPI:
     def __init__(self, url: str, path: str, username: str, password: str, api_token: str = None):
         self.url = url.rstrip('/')
@@ -133,50 +135,31 @@ class XrayPanelAPI:
         self.api_token = api_token
         self.session = requests.Session()
         self.session.verify = False
-        self.cookie = None
-        self.logged_in = False
         self.login()
     
     def login(self) -> bool:
         """Авторизация в панели 3x-ui"""
         try:
-            # Пробуем логин через API токен
             if self.api_token:
-                logger.info("✅ Используем API токен для авторизации")
-                self.logged_in = True
+                logger.info("✅ Используем API токен")
                 return True
             
-            # Стандартный логин
             login_url = f"{self.url}{self.path}/login"
             login_data = {
                 "username": self.username,
                 "password": self.password
             }
             
-            logger.info(f"Попытка входа в 3x-ui: {login_url}")
-            
-            response = self.session.post(
-                login_url,
-                json=login_data,
-                timeout=30
-            )
+            response = self.session.post(login_url, json=login_data, timeout=30)
             
             if response.status_code == 200:
-                try:
-                    result = response.json()
-                    if result.get('success'):
-                        self.cookie = response.cookies.get_dict()
-                        self.logged_in = True
-                        logger.info("✅ Успешная авторизация в 3x-ui")
-                        return True
-                except:
-                    if response.cookies:
-                        self.cookie = response.cookies.get_dict()
-                        self.logged_in = True
-                        logger.info("✅ Успешная авторизация в 3x-ui (по кукам)")
-                        return True
+                result = response.json()
+                if result.get('success'):
+                    self.session.cookies.update(response.cookies)
+                    logger.info("✅ Успешная авторизация в 3x-ui")
+                    return True
             
-            logger.error(f"❌ Ошибка авторизации: {response.status_code}")
+            logger.error(f"❌ Ошибка авторизации")
             return False
                 
         except Exception as e:
@@ -184,18 +167,14 @@ class XrayPanelAPI:
             return False
     
     def add_client(self, uuid: str, email: str, expiry_time: int, inbound_id: int = None) -> bool:
-        """
-        Добавление клиента через API панели
-        Используем endpoint: /panel/api/inbounds/addClient
-        """
+        """Добавление клиента через API"""
         if not inbound_id:
             inbound_id = XRAY_INBOUND_ID
         
         try:
-            # Используем API эндпоинт для добавления клиента
+            # Используем правильный API эндпоинт
             add_client_url = f"{self.url}{self.path}/panel/api/inbounds/addClient"
             
-            # Подготавливаем данные клиента
             client_data = {
                 "id": uuid,
                 "email": email,
@@ -218,10 +197,8 @@ class XrayPanelAPI:
                 "Content-Type": "application/json"
             }
             
-            logger.info(f"📤 Создание клиента через API: {email}")
+            logger.info(f"📤 Создание клиента: {email}")
             logger.info(f"📤 Inbound ID: {inbound_id}")
-            logger.info(f"📤 UUID: {uuid}")
-            logger.info(f"📤 Expiry: {expiry_time}")
             
             response = self.session.post(
                 add_client_url,
@@ -230,51 +207,25 @@ class XrayPanelAPI:
                 timeout=30
             )
             
-            logger.info(f"📥 Статус ответа: {response.status_code}")
-            
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    logger.info(f"📥 Ответ API: {json.dumps(result, indent=2)}")
-                    
-                    if result.get('success'):
-                        logger.info(f"✅ Клиент {email} успешно создан!")
-                        return True
-                    else:
-                        error_msg = result.get('msg', 'Неизвестная ошибка')
-                        logger.error(f"❌ Ошибка создания клиента: {error_msg}")
-                        return False
-                except Exception as e:
-                    logger.error(f"❌ Ошибка парсинга ответа: {e}")
-                    return False
-            else:
-                logger.error(f"❌ HTTP ошибка: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка при создании клиента: {e}")
-            return False
-    
-    def get_clients(self, inbound_id: int = None) -> Optional[list]:
-        """Получение списка клиентов"""
-        if not inbound_id:
-            inbound_id = XRAY_INBOUND_ID
-        
-        try:
-            url = f"{self.url}{self.path}/panel/api/inbounds/get/{inbound_id}"
-            headers = {"Authorization": f"Bearer {self.api_token}"}
-            
-            response = self.session.get(url, headers=headers, timeout=30)
+            logger.info(f"📥 Статус: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
+                logger.info(f"📥 Ответ: {json.dumps(result, indent=2)}")
+                
                 if result.get('success'):
-                    return result.get('obj', {}).get('clients', [])
-            return None
+                    logger.info(f"✅ Клиент {email} создан!")
+                    return True
+                else:
+                    logger.error(f"❌ Ошибка: {result.get('msg', 'Unknown error')}")
+                    return False
+            else:
+                logger.error(f"❌ HTTP ошибка: {response.text}")
+                return False
                 
         except Exception as e:
-            logger.error(f"Ошибка получения клиентов: {e}")
-            return None
+            logger.error(f"❌ Ошибка: {e}")
+            return False
 
 # Инициализируем API
 try:
@@ -285,76 +236,51 @@ try:
         XRAY_PASSWORD,
         XRAY_API_TOKEN
     )
-    logger.info("API 3x-ui инициализирован")
-    
-    # Проверяем подключение и получаем список клиентов
-    clients = xray_api.get_clients()
-    if clients is not None:
-        logger.info(f"✅ Найдено клиентов: {len(clients)}")
-        for client in clients[:5]:  # Показываем первые 5
-            logger.info(f"  - {client.get('email')} | {client.get('id')}")
-    else:
-        logger.warning("⚠️ Не удалось получить список клиентов (возможно inbound пуст)")
-        
+    logger.info("✅ API 3x-ui инициализирован")
+    logger.info(f"✅ Inbound ID: {XRAY_INBOUND_ID} (Kildear VPN)")
+    logger.info(f"✅ Порт: {VPN_SERVER_PORT}")
 except Exception as e:
-    logger.error(f"❌ Ошибка инициализации API: {e}")
+    logger.error(f"❌ Ошибка: {e}")
     xray_api = None
 
 # ======================= ГЕНЕРАЦИЯ КЛЮЧЕЙ =======================
-def generate_random_port() -> int:
-    return random.randint(10000, 65535)
-
-def generate_vless_link(uuid: str, email: str, port: int) -> str:
-    flow = "xtls-rprx-vision"
-    encryption = "none"
-    security = "none"
-    
+def generate_vless_link(uuid: str, email: str) -> str:
+    """Генерация VLESS ключа для Kildear VPN (WS протокол)"""
+    # Формат для WS протокола
     vless_link = (
         f"vless://{uuid}@"
-        f"{VPN_SERVER_IP}:{port}"
-        f"?type=tcp&security={security}"
-        f"&encryption={encryption}"
-        f"&flow={flow}"
-        f"&sni={VPN_DOMAIN}"
-        f"&fp=chrome"
+        f"{VPN_SERVER_IP}:{VPN_SERVER_PORT}"
+        f"?type=ws"
+        f"&security=none"
+        f"&encryption=none"
+        f"&host={VPN_DOMAIN}"
+        f"&path={VPN_PATH}"
         f"#{email}"
     )
     
     return vless_link
 
 def create_vpn_user_on_server(user_id: int, plan_id: str) -> tuple:
-    """Создание пользователя на 3x-ui через API"""
-    # Генерируем UUID
+    """Создание пользователя на 3x-ui"""
     user_uuid = str(uuid.uuid4())
-    
-    # Создаем email
     email = f"user_{user_id}_{int(datetime.now().timestamp())}"
     
-    # Генерируем порт
-    port = generate_random_port()
-    
-    # Получаем тариф
     plan = PLANS[plan_id]
-    
-    # Вычисляем время истечения (в миллисекундах)
     expiry_time = int((datetime.now() + timedelta(days=plan['days'])).timestamp() * 1000)
     
-    # Создаем клиента в 3x-ui через API
+    # Создаем клиента
     client_created = False
     if xray_api:
         client_created = xray_api.add_client(user_uuid, email, expiry_time, int(XRAY_INBOUND_ID))
         if client_created:
-            logger.info(f"✅ Клиент создан на панели: {email}")
-            logger.info(f"🔗 Ссылка на клиента: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/clients")
+            logger.info(f"✅ Клиент создан: {email}")
         else:
-            logger.warning(f"⚠️ Не удалось создать клиента на панели")
-    else:
-        logger.warning("⚠️ API не инициализирован")
+            logger.warning(f"⚠️ Не удалось создать клиента")
     
     # Генерируем VLESS ссылку
-    vless_link = generate_vless_link(user_uuid, email, port)
+    vless_link = generate_vless_link(user_uuid, email)
     
-    return vless_link, user_uuid, email, port
+    return vless_link, user_uuid, email
 
 # ======================= ФУНКЦИИ ДЛЯ ЮKASSA =======================
 async def create_yookassa_payment(user_id: int, plan_id: str, amount: int) -> Dict:
@@ -476,32 +402,27 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     end_date = start_date + timedelta(days=plan['days'])
     
     # Создаем пользователя на сервере
-    vpn_key, user_uuid, client_id, port = create_vpn_user_on_server(user_id, plan_id)
+    vpn_key, user_uuid, client_id = create_vpn_user_on_server(user_id, plan_id)
     
-    # Генерируем UUID для подписки
     subscription_uuid = str(uuid.uuid4())
     
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
     
-    # Деактивируем старые подписки
     c.execute("UPDATE subscriptions SET status = 'inactive' WHERE user_id = ? AND status = 'active'", (user_id,))
     
-    # Создаем новую подписку
     c.execute("""INSERT INTO subscriptions 
                  (user_id, plan_id, start_date, end_date, status, price, payment_id, vpn_key, uuid, client_id, port, subscription_uuid)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-              (user_id, plan_id, start_date, end_date, 'active', price, payment_id, vpn_key, user_uuid, client_id, port, subscription_uuid))
+              (user_id, plan_id, start_date, end_date, 'active', price, payment_id, vpn_key, user_uuid, client_id, VPN_SERVER_PORT, subscription_uuid))
     
     subscription_id = c.lastrowid
     
-    # Сохраняем ключ
     c.execute("""INSERT INTO vpn_keys 
                  (key, user_id, subscription_id, created_at, expires_at, status, devices, uuid, client_id, port, subscription_uuid)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-              (vpn_key, user_id, subscription_id, start_date, end_date, 'active', plan['devices'], user_uuid, client_id, port, subscription_uuid))
+              (vpn_key, user_id, subscription_id, start_date, end_date, 'active', plan['devices'], user_uuid, client_id, VPN_SERVER_PORT, subscription_uuid))
     
-    # Обновляем пользователя
     c.execute("""UPDATE users 
                  SET current_subscription = ?, subscription_end = ?, devices = ?, subscription_uuid = ?
                  WHERE user_id = ?""",
@@ -510,7 +431,7 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     conn.commit()
     conn.close()
     
-    logger.info(f"✅ Подписка создана: user={user_id}, plan={plan_id}, port={port}")
+    logger.info(f"✅ Подписка создана: user={user_id}, plan={plan_id}")
     return subscription_id
 
 def get_user_vpn_keys(user_id: int) -> list:
@@ -799,14 +720,13 @@ async def process_plan_selection(callback: CallbackQuery):
         
         active_sub = get_active_subscription(user_id)
         vpn_key = active_sub.get('vpn_key') if active_sub else None
-        port = active_sub.get('port') if active_sub else "?"
         
         success_text = f"""
 🎉 <b>Поздравляем! Бесплатная подписка активирована!</b>
 
 📅 Период: {plan['days']} дней
 📱 Устройств: {plan['devices']}
-🔌 Порт: {port}
+🔌 Порт: {VPN_SERVER_PORT}
 
 🔑 <b>Ваш VPN ключ:</b>
 <code>{vpn_key}</code>
@@ -885,7 +805,6 @@ async def check_payment_status(callback: CallbackQuery):
                 
                 active_sub = get_active_subscription(user_id)
                 vpn_key = active_sub.get('vpn_key') if active_sub else None
-                port = active_sub.get('port') if active_sub else "?"
                 plan = PLANS[plan_id]
                 subscription_uuid = active_sub.get('subscription_uuid') if active_sub else ""
                 
@@ -895,7 +814,7 @@ async def check_payment_status(callback: CallbackQuery):
 🎉 Подписка на тариф «{plan['label']}» активирована!
 📅 Период: {plan['days']} дней
 📱 Устройств: {plan['devices']}
-🔌 Порт: {port}
+🔌 Порт: {VPN_SERVER_PORT}
 
 🔑 <b>Ваш VPN ключ:</b>
 <code>{vpn_key}</code>
@@ -1051,7 +970,6 @@ async def yookassa_webhook(request):
                 
                 active_sub = get_active_subscription(user_id)
                 vpn_key = active_sub.get('vpn_key') if active_sub else None
-                port = active_sub.get('port') if active_sub else "?"
                 subscription_uuid = active_sub.get('subscription_uuid') if active_sub else ""
                 plan = PLANS[plan_id]
                 
@@ -1061,7 +979,7 @@ async def yookassa_webhook(request):
                         f"✅ <b>Оплата прошла успешно!</b>\n\n"
                         f"🎉 Подписка на тариф «{plan['label']}» активирована!\n"
                         f"📅 Период: {plan['days']} дней\n"
-                        f"🔌 Порт: {port}\n"
+                        f"🔌 Порт: {VPN_SERVER_PORT}\n"
                         f"🔑 <b>Ваш VPN ключ:</b>\n<code>{vpn_key}</code>\n\n"
                         f"📥 <b>Ссылка для подписки:</b>\n<code>{SUBSCRIPTION_URL}/{subscription_uuid}</code>\n\n"
                         f"Ключ и ссылка также доступны в меню бота.",
@@ -1114,9 +1032,9 @@ async def main():
     
     logger.info(f"✅ Бот запущен на порту {port}")
     logger.info(f"✅ 3x-ui панель: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}")
+    logger.info(f"✅ Inbound Kildear VPN (ID={XRAY_INBOUND_ID})")
+    logger.info(f"✅ Порт: {VPN_SERVER_PORT}")
     logger.info(f"✅ Клиенты: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/clients")
-    logger.info(f"✅ Подписка: {SUBSCRIPTION_URL}")
-    logger.info(f"✅ ЮKassa подключена")
     
     try:
         await asyncio.Event().wait()
