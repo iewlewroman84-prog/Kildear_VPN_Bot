@@ -1,6 +1,7 @@
 import os
 import logging
 import sqlite3
+import secrets as pysecrets
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 import asyncio
@@ -11,27 +12,33 @@ from aiogram import F
 import json
 import uuid
 import requests
+import urllib3
 from aiohttp import web
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # ======================= НАСТРОЙКИ =======================
-BOT_TOKEN = "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo"
+# Секреты лучше вынести в переменные окружения (Render/Docker и т.п.),
+# os.environ.get(..., "значение по умолчанию") позволяет держать код в git
+# без реальных паролей.
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
 
 # Данные 3x-ui панели
-XRAY_PANEL_URL = "https://2.26.70.65:55347"
-XRAY_PANEL_PATH = "/mMH522DscvfBbpFwaA"
-XRAY_USERNAME = "fHRTAk9lFz"
-XRAY_PASSWORD = "pM0xjYSy4N"
-XRAY_INBOUND_ID = 2
-XRAY_API_TOKEN = "tlZpRhpGQA54Uyta9p9chp42oymKG8NjoauzprvEqHSHqrye"
+XRAY_PANEL_URL = os.environ.get("XRAY_PANEL_URL", "https://2.26.70.65:55347")
+XRAY_PANEL_PATH = os.environ.get("XRAY_PANEL_PATH", "/mMH522DscvfBbpFwaA")
+XRAY_USERNAME = os.environ.get("XRAY_USERNAME", "fHRTAk9lFz")
+XRAY_PASSWORD = os.environ.get("XRAY_PASSWORD", "pM0xjYSy4N")
+XRAY_INBOUND_ID = int(os.environ.get("XRAY_INBOUND_ID", "2"))
 
 # Настройки VPN
-VPN_SERVER_IP = "2.26.70.65"
-VPN_SERVER_PORT = "40224"
-VPN_DOMAIN = "2.26.70.65"
-VPN_PATH = "/mMH522DscvfBbpFwaA"
+VPN_SERVER_IP = os.environ.get("VPN_SERVER_IP", "2.26.70.65")
+VPN_SERVER_PORT = os.environ.get("VPN_SERVER_PORT", "40224")
+VPN_DOMAIN = os.environ.get("VPN_DOMAIN", "2.26.70.65")
+VPN_PATH = os.environ.get("VPN_PATH", "/mMH522DscvfBbpFwaA")
 
-# Подписка
-SUBSCRIPTION_URL = "https://2.26.70.65:2096/sub/mc3psfn9f3t39r2x"
+# Базовый URL для ссылок подписки. ВАЖНО: это должен быть путь ДО subId,
+# сам subId генерируется индивидуально для каждого клиента (см. ниже).
+SUBSCRIPTION_BASE_URL = os.environ.get("SUBSCRIPTION_BASE_URL", "https://2.26.70.65:2096/sub/")
 
 # ======================= ТАРИФЫ =======================
 PLANS = {
@@ -53,9 +60,9 @@ dp = Dispatcher()
 def init_db():
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, 
+                 (user_id INTEGER PRIMARY KEY,
                   username TEXT,
                   first_name TEXT,
                   last_name TEXT,
@@ -64,7 +71,7 @@ def init_db():
                   subscription_end TIMESTAMP,
                   devices INTEGER DEFAULT 1,
                   subscription_uuid TEXT)''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER,
@@ -80,7 +87,7 @@ def init_db():
                   port INTEGER,
                   subscription_uuid TEXT,
                   FOREIGN KEY (user_id) REFERENCES users (user_id))''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS vpn_keys
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   key TEXT UNIQUE,
@@ -96,7 +103,7 @@ def init_db():
                   subscription_uuid TEXT,
                   FOREIGN KEY (user_id) REFERENCES users (user_id),
                   FOREIGN KEY (subscription_id) REFERENCES subscriptions (id))''')
-    
+
     conn.commit()
     conn.close()
     logger.info("База данных инициализирована")
@@ -105,14 +112,24 @@ init_db()
 
 # ======================= РАБОТА С 3X-UI =======================
 class XrayAPI:
+    """
+    Клиент для 3x-ui панели.
+
+    Ключевой момент, из-за которого клиенты раньше не создавались:
+    у 3x-ui эндпоинт /panel/api/inbounds/addClient ожидает поле
+    "settings", которое является JSON-СТРОКОЙ (то есть json.dumps
+    от объекта {"clients": [...]}), а не вложенным JSON-объектом.
+    Авторизация — через сессионную cookie после /login, отдельный
+    Bearer-токен панели не использует.
+    """
+
     def __init__(self):
         self.session = requests.Session()
         self.session.verify = False
         self.base_url = f"{XRAY_PANEL_URL}{XRAY_PANEL_PATH}"
         self.logged_in = False
-        self.cookies = None
         self.login()
-    
+
     def login(self) -> bool:
         """Авторизация через логин/пароль"""
         try:
@@ -121,113 +138,109 @@ class XrayAPI:
                 "username": XRAY_USERNAME,
                 "password": XRAY_PASSWORD
             }
-            
+
             logger.info(f"📤 Авторизация: {url}")
-            response = self.session.post(url, json=data, timeout=30)
-            
+            response = self.session.post(url, data=data, timeout=30)
+
             logger.info(f"📥 Статус: {response.status_code}")
-            
+
             if response.status_code == 200:
                 try:
                     result = response.json()
-                    logger.info(f"📥 Результат: {result}")
-                    
                     if result.get('success'):
-                        self.cookies = response.cookies.get_dict()
                         self.logged_in = True
-                        logger.info(f"✅ Авторизация успешна! Cookies: {self.cookies}")
+                        logger.info("✅ Авторизация успешна!")
                         return True
-                except:
-                    # Если ответ не JSON, проверяем куки
-                    if response.cookies:
-                        self.cookies = response.cookies.get_dict()
+                    else:
+                        logger.error(f"❌ Панель отклонила логин: {result.get('msg')}")
+                except ValueError:
+                    if self.session.cookies:
                         self.logged_in = True
-                        logger.info(f"✅ Авторизация успешна (по кукам)!")
+                        logger.info("✅ Авторизация успешна (по кукам)!")
                         return True
-            
-            logger.error(f"❌ Ошибка авторизации")
+
+            logger.error("❌ Ошибка авторизации")
+            self.logged_in = False
             return False
-                
+
         except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
+            logger.error(f"❌ Ошибка при логине: {e}")
+            self.logged_in = False
             return False
-    
-    def add_client(self, uuid: str, email: str, expiry_time: int) -> bool:
-        """Пробуем все возможные пути для добавления клиента"""
-        
-        # Список возможных эндпоинтов
-        endpoints = [
-            f"{self.base_url}/panel/api/inbounds/addClient",
-            f"{self.base_url}/panel/api/inbound/addClient",  # без 's'
-            f"{self.base_url}/api/inbounds/addClient",
-            f"{self.base_url}/xui/API/inbounds/addClient",
-            f"{self.base_url}/panel/inbound/addClient",
-            f"{self.base_url}/addClient",
-        ]
-        
+
+    def add_client(self, client_uuid: str, email: str, expiry_time: int, sub_id: str) -> bool:
+        """Создаёт клиента в указанном inbound через настоящий API 3x-ui."""
+
+        if not self.logged_in and not self.login():
+            logger.error("❌ Нет активной сессии в панели, создание клиента невозможно")
+            return False
+
+        endpoint = f"{self.base_url}/panel/api/inbounds/addClient"
+
         client_data = {
-            "id": uuid,
+            "id": client_uuid,
             "email": email,
             "flow": "xtls-rprx-vision",
-            "limitIp": 1,
+            "limitIp": 0,
             "totalGB": 0,
             "expiryTime": expiry_time,
             "enable": True,
             "tgId": "",
-            "subId": ""
+            "subId": sub_id,
+            "reset": 0,
         }
-        
-        payloads = [
-            {"clients": [client_data], "inboundId": XRAY_INBOUND_ID},
-            {"client": client_data, "inboundId": XRAY_INBOUND_ID},
-            {"clients": [client_data]},  # без inboundId
-            client_data  # только клиент
-        ]
-        
-        headers = {
-            "Authorization": f"Bearer {XRAY_API_TOKEN}",
-            "Content-Type": "application/json"
+
+        # settings ДОЛЖЕН быть JSON-строкой, а не объектом — это и есть
+        # формат, который реально понимает 3x-ui.
+        payload = {
+            "id": XRAY_INBOUND_ID,
+            "settings": json.dumps({"clients": [client_data]})
         }
-        
-        # Пробуем каждый эндпоинт
-        for endpoint in endpoints:
-            for payload in payloads:
-                try:
-                    logger.info(f"\n📤 Пробуем: {endpoint}")
-                    logger.info(f"📤 Payload: {json.dumps(payload, indent=2)}")
-                    
-                    response = self.session.post(endpoint, json=payload, headers=headers, timeout=30)
-                    
-                    logger.info(f"📥 Статус: {response.status_code}")
-                    
-                    if response.status_code == 200:
-                        try:
-                            result = response.json()
-                            logger.info(f"📥 Ответ: {json.dumps(result, indent=2)}")
-                            if result.get('success'):
-                                logger.info(f"✅ Клиент {email} создан!")
-                                return True
-                        except:
-                            logger.info(f"✅ Клиент создан (статус 200)")
-                            return True
-                    elif response.status_code == 404:
-                        logger.warning(f"⚠️ 404: {endpoint}")
-                    else:
-                        logger.warning(f"⚠️ Ошибка {response.status_code}: {response.text[:100]}")
-                        
-                except Exception as e:
-                    logger.error(f"❌ Ошибка: {e}")
-        
-        logger.error("❌ Все эндпоинты не сработали")
-        return False
+
+        def _do_request():
+            return self.session.post(endpoint, json=payload, timeout=30)
+
+        try:
+            response = _do_request()
+
+            # Сессия могла протухнуть — пробуем перелогиниться один раз
+            if response.status_code in (401, 403):
+                logger.warning("⚠️ Сессия истекла, повторный логин...")
+                if self.login():
+                    response = _do_request()
+
+            if response.status_code != 200:
+                logger.error(f"❌ HTTP {response.status_code}: {response.text[:300]}")
+                return False
+
+            try:
+                result = response.json()
+            except ValueError:
+                logger.error(f"❌ Панель вернула не-JSON ответ: {response.text[:300]}")
+                return False
+
+            if result.get('success'):
+                logger.info(f"✅ Клиент {email} создан в inbound {XRAY_INBOUND_ID}")
+                return True
+
+            logger.error(f"❌ Панель отказала: {result.get('msg')}")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка запроса к панели: {e}")
+            return False
 
 # Создаем экземпляр API
 xray_api = XrayAPI()
 
 # ======================= ГЕНЕРАЦИЯ КЛЮЧА =======================
-def generate_vless_link(uuid: str, email: str) -> str:
+def generate_sub_id() -> str:
+    """16-символьный идентификатор подписки, как ожидает sub-плагин 3x-ui."""
+    return pysecrets.token_hex(8)
+
+def generate_vless_link(client_uuid: str, email: str) -> str:
     vless_link = (
-        f"vless://{uuid}@"
+        f"vless://{client_uuid}@"
         f"{VPN_SERVER_IP}:{VPN_SERVER_PORT}"
         f"?type=ws"
         f"&security=none"
@@ -239,20 +252,26 @@ def generate_vless_link(uuid: str, email: str) -> str:
     return vless_link
 
 def create_vpn_user(user_id: int, plan_id: str) -> tuple:
-    user_uuid = str(uuid.uuid4())
+    """
+    Возвращает (vless_link, client_uuid, email, sub_id, success).
+    success=False означает, что клиент в панели НЕ был создан —
+    вызывающий код обязан это проверить и не выдавать ключ как рабочий.
+    """
+    client_uuid = str(uuid.uuid4())
     email = f"user_{user_id}_{int(datetime.now().timestamp())}"
+    sub_id = generate_sub_id()
     plan = PLANS[plan_id]
     expiry_time = int((datetime.now() + timedelta(days=plan['days'])).timestamp() * 1000)
-    
-    success = xray_api.add_client(user_uuid, email, expiry_time)
-    
+
+    success = xray_api.add_client(client_uuid, email, expiry_time, sub_id)
+
     if success:
         logger.info(f"✅ Клиент создан: {email}")
     else:
-        logger.warning(f"⚠️ Клиент НЕ создан! Ключ будет для теста")
-    
-    vless_link = generate_vless_link(user_uuid, email)
-    return vless_link, user_uuid, email
+        logger.error(f"❌ Клиент НЕ создан в панели: {email}")
+
+    vless_link = generate_vless_link(client_uuid, email)
+    return vless_link, client_uuid, email, sub_id, success
 
 # ======================= ФУНКЦИИ БД =======================
 def get_user(user_id: int) -> Optional[Dict]:
@@ -261,7 +280,7 @@ def get_user(user_id: int) -> Optional[Dict]:
     c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     user = c.fetchone()
     conn.close()
-    
+
     if user:
         return {
             'user_id': user[0],
@@ -279,8 +298,8 @@ def get_user(user_id: int) -> Optional[Dict]:
 def create_user(user_id: int, username: str, first_name: str, last_name: str = None):
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
-    c.execute("""INSERT OR IGNORE INTO users 
-                 (user_id, username, first_name, last_name, registration_date, devices) 
+    c.execute("""INSERT OR IGNORE INTO users
+                 (user_id, username, first_name, last_name, registration_date, devices)
                  VALUES (?, ?, ?, ?, ?, ?)""",
               (user_id, username, first_name, last_name, datetime.now(), 1))
     conn.commit()
@@ -289,12 +308,12 @@ def create_user(user_id: int, username: str, first_name: str, last_name: str = N
 def get_active_subscription(user_id: int) -> Optional[Dict]:
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
-    c.execute("""SELECT * FROM subscriptions 
+    c.execute("""SELECT * FROM subscriptions
                  WHERE user_id = ? AND status = 'active' AND end_date > datetime('now')
                  ORDER BY end_date DESC LIMIT 1""", (user_id,))
     sub = c.fetchone()
     conn.close()
-    
+
     if sub:
         return {
             'id': sub[0],
@@ -313,47 +332,59 @@ def get_active_subscription(user_id: int) -> Optional[Dict]:
         }
     return None
 
-def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str = None) -> int:
+def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str = None):
+    """
+    Возвращает (subscription_id, vpn_key, success).
+    Если success=False — запись в БД всё равно делается (для истории),
+    но статус помечается как 'failed', чтобы не выдавать пользователю
+    ключ, который не работает.
+    """
     plan = PLANS[plan_id]
     start_date = datetime.now()
     end_date = start_date + timedelta(days=plan['days'])
-    
-    vpn_key, user_uuid, client_id = create_vpn_user(user_id, plan_id)
-    
-    subscription_uuid = str(uuid.uuid4())
-    
+
+    vpn_key, client_uuid, client_id, sub_id, success = create_vpn_user(user_id, plan_id)
+
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
-    
-    c.execute("UPDATE subscriptions SET status = 'inactive' WHERE user_id = ? AND status = 'active'", (user_id,))
-    
-    c.execute("""INSERT INTO subscriptions 
+
+    status = 'active' if success else 'failed'
+
+    if success:
+        c.execute("UPDATE subscriptions SET status = 'inactive' WHERE user_id = ? AND status = 'active'", (user_id,))
+
+    c.execute("""INSERT INTO subscriptions
                  (user_id, plan_id, start_date, end_date, status, price, payment_id, vpn_key, uuid, client_id, port, subscription_uuid)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-              (user_id, plan_id, start_date, end_date, 'active', price, payment_id, vpn_key, user_uuid, client_id, VPN_SERVER_PORT, subscription_uuid))
-    
+              (user_id, plan_id, start_date, end_date, status, price, payment_id, vpn_key, client_uuid, client_id, VPN_SERVER_PORT, sub_id))
+
     subscription_id = c.lastrowid
-    
-    c.execute("""INSERT INTO vpn_keys 
-                 (key, user_id, subscription_id, created_at, expires_at, status, devices, uuid, client_id, port, subscription_uuid)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-              (vpn_key, user_id, subscription_id, start_date, end_date, 'active', plan['devices'], user_uuid, client_id, VPN_SERVER_PORT, subscription_uuid))
-    
-    c.execute("""UPDATE users 
-                 SET current_subscription = ?, subscription_end = ?, devices = ?, subscription_uuid = ?
-                 WHERE user_id = ?""",
-              (plan_id, end_date, plan['devices'], subscription_uuid, user_id))
-    
+
+    if success:
+        c.execute("""INSERT INTO vpn_keys
+                     (key, user_id, subscription_id, created_at, expires_at, status, devices, uuid, client_id, port, subscription_uuid)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  (vpn_key, user_id, subscription_id, start_date, end_date, 'active', plan['devices'], client_uuid, client_id, VPN_SERVER_PORT, sub_id))
+
+        c.execute("""UPDATE users
+                     SET current_subscription = ?, subscription_end = ?, devices = ?, subscription_uuid = ?
+                     WHERE user_id = ?""",
+                  (plan_id, end_date, plan['devices'], sub_id, user_id))
+
     conn.commit()
     conn.close()
-    
-    logger.info(f"✅ Подписка создана: user={user_id}, plan={plan_id}")
-    return subscription_id
+
+    if success:
+        logger.info(f"✅ Подписка создана: user={user_id}, plan={plan_id}")
+    else:
+        logger.error(f"❌ Подписка НЕ активирована (сбой панели): user={user_id}, plan={plan_id}")
+
+    return subscription_id, vpn_key, success
 
 def get_user_vpn_keys(user_id: int) -> list:
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
-    c.execute("""SELECT key, expires_at, status, devices, port FROM vpn_keys 
+    c.execute("""SELECT key, expires_at, status, devices, port FROM vpn_keys
                  WHERE user_id = ? AND status = 'active' AND expires_at > datetime('now')
                  ORDER BY created_at DESC""", (user_id,))
     keys = c.fetchall()
@@ -373,18 +404,18 @@ def get_main_keyboard():
 
 def get_plans_keyboard():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    
+
     for plan_id, plan in PLANS.items():
         price_text = f"{plan['price']} ₽" if plan['price'] > 0 else "Бесплатно"
         button_text = f"{plan['emoji']} {plan['label']} — {price_text}"
         keyboard.inline_keyboard.append([
             InlineKeyboardButton(text=button_text, callback_data=f"plan_{plan_id}")
         ])
-    
+
     keyboard.inline_keyboard.append([
         InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
     ])
-    
+
     return keyboard
 
 def get_keys_keyboard():
@@ -399,8 +430,8 @@ def get_keys_keyboard():
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     create_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
-    
-    text = f"""
+
+    text = """
 🌟 <b>Добро пожаловать в VPN сервис Kildear!</b>
 
 📋 Тарифы:
@@ -420,20 +451,20 @@ async def back_to_main(callback: CallbackQuery):
 async def show_plans(callback: CallbackQuery):
     active_sub = get_active_subscription(callback.from_user.id)
     plans_text = "📱 Выберите тариф:\n\n"
-    
+
     if active_sub:
         try:
             end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
             days_left = (end_date - datetime.now()).days
             if days_left > 0:
                 plans_text += f"✅ Активна до {end_date.strftime('%d.%m.%Y')} (осталось {days_left} дн.)\n\n"
-        except:
+        except Exception:
             pass
-    
+
     for plan_id, plan in PLANS.items():
         price_text = f"{plan['price']} ₽" if plan['price'] > 0 else "Бесплатно"
         plans_text += f"{plan['emoji']} {plan['label']} — {price_text}\n"
-    
+
     await callback.message.edit_text(plans_text, reply_markup=get_plans_keyboard(), parse_mode="HTML")
     await callback.answer()
 
@@ -441,19 +472,19 @@ async def show_plans(callback: CallbackQuery):
 async def show_keys(callback: CallbackQuery):
     user_id = callback.from_user.id
     keys = get_user_vpn_keys(user_id)
-    
+
     if not keys:
         await callback.message.edit_text("🔑 Нет активных ключей", reply_markup=get_keys_keyboard(), parse_mode="HTML")
         await callback.answer()
         return
-    
+
     text = "🔑 Ваши ключи:\n\n"
     for idx, key_data in enumerate(keys, 1):
         key, expires_at, status, devices, port = key_data
         expires = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S.%f')
         days_left = (expires - datetime.now()).days
         text += f"<b>#{idx}</b>\n<code>{key}</code>\n📱 {devices} уст. ⏳ {days_left} дн.\n\n"
-    
+
     await callback.message.edit_text(text, reply_markup=get_keys_keyboard(), parse_mode="HTML")
     await callback.answer()
 
@@ -461,15 +492,16 @@ async def show_keys(callback: CallbackQuery):
 async def show_subscription(callback: CallbackQuery):
     user_id = callback.from_user.id
     active_sub = get_active_subscription(user_id)
-    
+
     if not active_sub:
         await callback.message.edit_text("❌ Нет активной подписки", reply_markup=get_main_keyboard(), parse_mode="HTML")
         await callback.answer()
         return
-    
-    subscription_url = f"{SUBSCRIPTION_URL}/{active_sub.get('subscription_uuid', '')}"
+
+    sub_id = active_sub.get('subscription_uuid', '')
+    subscription_url = f"{SUBSCRIPTION_BASE_URL}{sub_id}"
     end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
-    
+
     text = f"""
 📥 Ссылка для подписки:
 <code>{subscription_url}</code>
@@ -477,17 +509,17 @@ async def show_subscription(callback: CallbackQuery):
 📅 До: {end_date.strftime('%d.%m.%Y')}
 """
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Копировать", callback_data=f"copy_{active_sub.get('subscription_uuid', '')}")],
+        [InlineKeyboardButton(text="📋 Копировать", callback_data=f"copy_{sub_id}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
-    
+
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("copy_"))
 async def copy_sub(callback: CallbackQuery):
-    uuid_val = callback.data.replace("copy_", "")
-    await callback.message.answer(f"🔗 <code>{SUBSCRIPTION_URL}/{uuid_val}</code>", parse_mode="HTML")
+    sub_id = callback.data.replace("copy_", "")
+    await callback.message.answer(f"🔗 <code>{SUBSCRIPTION_BASE_URL}{sub_id}</code>", parse_mode="HTML")
     await callback.answer("✅ Скопируйте!")
 
 @dp.callback_query(F.data == "refresh_keys")
@@ -501,24 +533,31 @@ async def process_plan(callback: CallbackQuery):
     if not plan:
         await callback.answer("❌ Тариф не найден")
         return
-    
+
     user_id = callback.from_user.id
-    
+
     if plan['price'] == 0:
         conn = sqlite3.connect('subscriptions.db')
         c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND plan_id = '2d'", (user_id,))
+        c.execute("SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND plan_id = '2d' AND status != 'failed'", (user_id,))
         count = c.fetchone()[0]
         conn.close()
-        
+
         if count > 0:
             await callback.answer("❌ Вы уже использовали бесплатный период!", show_alert=True)
             return
-        
-        create_subscription(user_id, plan_id, 0)
-        active_sub = get_active_subscription(user_id)
-        vpn_key = active_sub.get('vpn_key') if active_sub else None
-        
+
+        _, vpn_key, success = create_subscription(user_id, plan_id, 0)
+
+        if not success:
+            await callback.message.edit_text(
+                "⚠️ Не удалось создать ключ на сервере. Попробуйте ещё раз чуть позже "
+                "или напишите в поддержку.",
+                reply_markup=get_main_keyboard(), parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+
         text = f"""
 🎉 Бесплатная подписка активирована!
 
@@ -531,7 +570,7 @@ async def process_plan(callback: CallbackQuery):
         await callback.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
         await callback.answer()
         return
-    
+
     text = f"""
 💳 Оплата подписки
 
@@ -544,7 +583,7 @@ async def process_plan(callback: CallbackQuery):
         [InlineKeyboardButton(text="✅ Тестовая активация", callback_data=f"test_{plan_id}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
-    
+
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
@@ -553,15 +592,23 @@ async def test_activate(callback: CallbackQuery):
     plan_id = callback.data.replace("test_", "")
     plan = PLANS.get(plan_id)
     user_id = callback.from_user.id
-    
+
     if not plan:
         await callback.answer("❌ Ошибка")
         return
-    
-    create_subscription(user_id, plan_id, plan['price'], "test")
-    active_sub = get_active_subscription(user_id)
-    vpn_key = active_sub.get('vpn_key') if active_sub else None
-    
+
+    _, vpn_key, success = create_subscription(user_id, plan_id, plan['price'], "test")
+
+    if not success:
+        await callback.message.edit_text(
+            "⚠️ Оплата прошла бы успешно, но сервер не смог выдать ключ. "
+            "Мы уже видим это в логах — попробуйте активировать ещё раз через минуту "
+            "или напишите в поддержку.",
+            reply_markup=get_main_keyboard(), parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
     text = f"""
 ✅ Подписка активирована!
 
@@ -581,11 +628,11 @@ async def show_profile(callback: CallbackQuery):
     user = get_user(user_id)
     active_sub = get_active_subscription(user_id)
     keys = get_user_vpn_keys(user_id)
-    
+
     text = f"👤 Профиль\n\n🆔 ID: {user_id}"
     if user:
         text += f"\n📝 Имя: {user.get('first_name', '?')}"
-    
+
     if active_sub:
         try:
             end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
@@ -594,19 +641,19 @@ async def show_profile(callback: CallbackQuery):
             text += f"\n\n📱 Подписка: {plan.get('label', '?')}"
             text += f"\n📅 До: {end_date.strftime('%d.%m.%Y')} ({days_left} дн.)"
             text += f"\n🔌 Порт: {active_sub.get('port', '?')}"
-        except:
+        except Exception:
             pass
     else:
         text += "\n\n❌ Нет подписки"
-    
+
     text += f"\n🔑 Ключей: {len(keys)}"
-    
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Купить", callback_data="buy_subscription")],
         [InlineKeyboardButton(text="🔑 Ключи", callback_data="my_keys")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
-    
+
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
@@ -624,7 +671,7 @@ async def show_help(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
-    
+
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
@@ -651,21 +698,21 @@ async def on_startup():
 
 async def main():
     port = int(os.environ.get('PORT', 8080))
-    
+
     app = web.Application()
     app.router.add_post('/webhook', webhook_handler)
     app.router.add_get('/', lambda request: web.Response(text='Bot is running!'))
-    
+
     await on_startup()
-    
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    
+
     logger.info(f"🚀 Бот запущен на порту {port}")
     logger.info(f"📡 Панель: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}")
-    
+
     try:
         await asyncio.Event().wait()
     except KeyboardInterrupt:
