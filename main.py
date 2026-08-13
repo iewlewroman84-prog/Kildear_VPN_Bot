@@ -138,20 +138,24 @@ async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
 
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Получаем первый активный Inbound
-            async with session.get(f"{DB_URL}/api/query/inbounds") as resp:
+            # 1. Получаем первый активный Inbound через API таблицы
+            async with session.get(f"{DB_URL}/api/table/inbounds") as resp:
                 if resp.status != 200:
                     logging.error(f"Ошибка получения Inbound: {resp.status}")
                     return None
                 data = await resp.json()
                 
-                if not data:
+                # SQLite Web возвращает список объектов в поле "rows"
+                rows = data.get("rows", [])
+                if not rows:
                     logging.error("Нет активных Inbound в базе")
                     return None
                 
-                inbound = data[0]
-                inbound_id = inbound["id"]
-                settings = json.loads(inbound["settings"])
+                # Берём первый Inbound
+                inbound = rows[0]
+                # Поля: id, ... settings
+                inbound_id = inbound[0]
+                settings = json.loads(inbound[1])  # settings - второе поле
                 
                 if "clients" not in settings:
                     settings["clients"] = []
@@ -172,13 +176,13 @@ async def create_vpn_user(telegram_id: int, days: int) -> Optional[str]:
                 
                 settings["clients"].append(new_client)
                 
-                # 2. Обновляем Inbound через API
+                # 2. Обновляем Inbound через API таблицы
                 update_data = {
                     "settings": json.dumps(settings)
                 }
                 
                 async with session.post(
-                    f"{DB_URL}/api/query/inbounds/{inbound_id}",
+                    f"{DB_URL}/api/table/inbounds/{inbound_id}",
                     json=update_data
                 ) as resp:
                     if resp.status == 200:
