@@ -8,41 +8,30 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
 from aiogram import F
-import aiohttp
-import base64
-import hashlib
 import json
 import uuid
 import requests
-import random
 from aiohttp import web
 
-# ======================= НАСТРОЙКИ =======================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
+# ======================= ПРЯМЫЕ НАСТРОЙКИ =======================
+BOT_TOKEN = "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo"
 
-# Настройки 3x-ui панели
-XRAY_PANEL_URL = os.environ.get("XRAY_PANEL_URL", "https://2.26.70.65:55347")
-XRAY_PANEL_PATH = os.environ.get("XRAY_PANEL_PATH", "/mMH522DscvfBbpFwaA")
-XRAY_USERNAME = os.environ.get("XRAY_USERNAME", "fHRTAk9lFz")
-XRAY_PASSWORD = os.environ.get("XRAY_PASSWORD", "pM0xjYSy4N")
-XRAY_INBOUND_ID = os.environ.get("XRAY_INBOUND_ID", "2")  # Kildear VPN
-XRAY_API_TOKEN = os.environ.get("XRAY_API_TOKEN", "tlZpRhpGQA54Uyta9p9chp42oymKG8NjoauzprvEqHSHqrye")
+# Данные 3x-ui панели
+XRAY_PANEL_URL = "https://2.26.70.65:55347"
+XRAY_PANEL_PATH = "/mMH522DscvfBbpFwaA"
+XRAY_USERNAME = "fHRTAk9lFz"
+XRAY_PASSWORD = "pM0xjYSy4N"
+XRAY_INBOUND_ID = 2
+XRAY_API_TOKEN = "tlZpRhpGQA54Uyta9p9chp42oymKG8NjoauzprvEqHSHqrye"
 
-# Настройки VPN сервера (из панели Kildear VPN)
-VPN_SERVER_IP = os.environ.get("VPN_SERVER_IP", "2.26.70.65")
-VPN_SERVER_PORT = os.environ.get("VPN_SERVER_PORT", "40224")  # Порт из inbound Kildear VPN
-VPN_DOMAIN = os.environ.get("VPN_DOMAIN", "2.26.70.65")
-VPN_PATH = os.environ.get("VPN_PATH", "/mMH522DscvfBbpFwaA")  # Path из панели
+# Настройки VPN
+VPN_SERVER_IP = "2.26.70.65"
+VPN_SERVER_PORT = "40224"
+VPN_DOMAIN = "2.26.70.65"
+VPN_PATH = "/mMH522DscvfBbpFwaA"
 
-# Настройки подписки
-SUBSCRIPTION_PATH = os.environ.get("SUBSCRIPTION_PATH", "/sub/mc3psfn9f3t39r2x")
-SUBSCRIPTION_URL = f"https://2.26.70.65:2096{SUBSCRIPTION_PATH}"
-
-# Настройки ЮKassa
-YKASSA_SHOP_ID = os.environ.get("YKASSA_SHOP_ID", "1434221")
-YKASSA_SECRET_KEY = os.environ.get("YKASSA_SECRET_KEY", "live_fH2K3m3SygBdP8P6bjaOwkRj4UKl5FwsatLZC-PJKt8")
-YKASSA_API_URL = "https://api.yookassa.ru/v3/payments"
-YKASSA_WEBHOOK_URL = os.environ.get("YKASSA_WEBHOOK_URL", "https://kildear-vpn-bot.onrender.com/webhook/yookassa")
+# Подписка
+SUBSCRIPTION_URL = "https://2.26.70.65:2096/sub/mc3psfn9f3t39r2x"
 
 # ======================= ТАРИФЫ =======================
 PLANS = {
@@ -125,128 +114,101 @@ def init_db():
 
 init_db()
 
-# ======================= ИНТЕГРАЦИЯ С 3X-UI =======================
-class XrayPanelAPI:
-    def __init__(self, url: str, path: str, username: str, password: str, api_token: str = None):
-        self.url = url.rstrip('/')
-        self.path = path.rstrip('/')
-        self.username = username
-        self.password = password
-        self.api_token = api_token
+# ======================= РАБОТА С 3X-UI =======================
+class XrayAPI:
+    def __init__(self):
         self.session = requests.Session()
         self.session.verify = False
-        self.login()
+        self.token = XRAY_API_TOKEN
+        # Правильный базовый URL - без дублирования /panel
+        self.base_url = f"{XRAY_PANEL_URL}{XRAY_PANEL_PATH}"
+        logger.info(f"✅ API URL: {self.base_url}")
     
-    def login(self) -> bool:
-        """Авторизация в панели 3x-ui"""
+    def add_client(self, uuid: str, email: str, expiry_time: int) -> bool:
+        """Добавление клиента через API - ПРАВИЛЬНЫЙ ЭНДПОИНТ"""
         try:
-            if self.api_token:
-                logger.info("✅ Используем API токен")
-                return True
-            
-            login_url = f"{self.url}{self.path}/login"
-            login_data = {
-                "username": self.username,
-                "password": self.password
-            }
-            
-            response = self.session.post(login_url, json=login_data, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    self.session.cookies.update(response.cookies)
-                    logger.info("✅ Успешная авторизация в 3x-ui")
-                    return True
-            
-            logger.error(f"❌ Ошибка авторизации")
-            return False
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка при авторизации: {e}")
-            return False
-    
-    def add_client(self, uuid: str, email: str, expiry_time: int, inbound_id: int = None) -> bool:
-        """Добавление клиента через API"""
-        if not inbound_id:
-            inbound_id = XRAY_INBOUND_ID
-        
-        try:
-            # Используем правильный API эндпоинт
-            add_client_url = f"{self.url}{self.path}/panel/api/inbounds/addClient"
-            
-            client_data = {
-                "id": uuid,
-                "email": email,
-                "flow": "xtls-rprx-vision",
-                "limitIp": 1,
-                "totalGB": 0,
-                "expiryTime": expiry_time,
-                "enable": True,
-                "tgId": "",
-                "subId": ""
-            }
+            # ПРАВИЛЬНЫЙ URL: /panel/api/inbounds/addClient
+            # НЕ /xray/inbound/addClient
+            url = f"{self.base_url}/panel/api/inbounds/addClient"
             
             payload = {
-                "clients": [client_data],
-                "inboundId": int(inbound_id)
+                "clients": [{
+                    "id": uuid,
+                    "email": email,
+                    "flow": "xtls-rprx-vision",
+                    "limitIp": 1,
+                    "totalGB": 0,
+                    "expiryTime": expiry_time,
+                    "enable": True,
+                    "tgId": "",
+                    "subId": ""
+                }],
+                "inboundId": XRAY_INBOUND_ID
             }
             
             headers = {
-                "Authorization": f"Bearer {self.api_token}",
+                "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json"
             }
             
-            logger.info(f"📤 Создание клиента: {email}")
-            logger.info(f"📤 Inbound ID: {inbound_id}")
+            logger.info(f"📤 URL: {url}")
+            logger.info(f"📤 Клиент: {email}")
+            logger.info(f"📤 Inbound: {XRAY_INBOUND_ID}")
+            logger.info(f"📤 UUID: {uuid}")
             
-            response = self.session.post(
-                add_client_url,
-                json=payload,
-                headers=headers,
-                timeout=30
-            )
+            response = self.session.post(url, json=payload, headers=headers, timeout=30)
             
             logger.info(f"📥 Статус: {response.status_code}")
+            logger.info(f"📥 Ответ: {response.text[:500]}")
             
             if response.status_code == 200:
                 result = response.json()
-                logger.info(f"📥 Ответ: {json.dumps(result, indent=2)}")
-                
                 if result.get('success'):
                     logger.info(f"✅ Клиент {email} создан!")
                     return True
                 else:
-                    logger.error(f"❌ Ошибка: {result.get('msg', 'Unknown error')}")
+                    logger.error(f"❌ Ошибка API: {result}")
                     return False
             else:
-                logger.error(f"❌ HTTP ошибка: {response.text}")
+                logger.error(f"❌ HTTP {response.status_code}: {response.text}")
                 return False
                 
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
             return False
+    
+    def get_inbounds(self):
+        """Получение списка inbounds для проверки"""
+        try:
+            url = f"{self.base_url}/panel/api/inbounds/list"
+            headers = {"Authorization": f"Bearer {self.token}"}
+            
+            response = self.session.get(url, headers=headers, timeout=30)
+            logger.info(f"📥 Inbounds статус: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"📥 Inbounds: {json.dumps(result, indent=2)[:500]}")
+                return result
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка: {e}")
+            return None
 
-# Инициализируем API
-try:
-    xray_api = XrayPanelAPI(
-        XRAY_PANEL_URL, 
-        XRAY_PANEL_PATH, 
-        XRAY_USERNAME, 
-        XRAY_PASSWORD,
-        XRAY_API_TOKEN
-    )
-    logger.info("✅ API 3x-ui инициализирован")
-    logger.info(f"✅ Inbound ID: {XRAY_INBOUND_ID} (Kildear VPN)")
-    logger.info(f"✅ Порт: {VPN_SERVER_PORT}")
-except Exception as e:
-    logger.error(f"❌ Ошибка: {e}")
-    xray_api = None
+# Создаем экземпляр API и проверяем
+xray_api = XrayAPI()
 
-# ======================= ГЕНЕРАЦИЯ КЛЮЧЕЙ =======================
+# Проверяем подключение к панели
+logger.info("🔍 Проверка подключения к панели...")
+inbounds = xray_api.get_inbounds()
+if inbounds:
+    logger.info("✅ Панель доступна!")
+else:
+    logger.warning("⚠️ Панель не отвечает или ошибка авторизации")
+
+# ======================= ГЕНЕРАЦИЯ КЛЮЧА =======================
 def generate_vless_link(uuid: str, email: str) -> str:
-    """Генерация VLESS ключа для Kildear VPN (WS протокол)"""
-    # Формат для WS протокола
+    """Генерация VLESS ключа для Kildear VPN (WS)"""
     vless_link = (
         f"vless://{uuid}@"
         f"{VPN_SERVER_IP}:{VPN_SERVER_PORT}"
@@ -257,87 +219,28 @@ def generate_vless_link(uuid: str, email: str) -> str:
         f"&path={VPN_PATH}"
         f"#{email}"
     )
-    
     return vless_link
 
-def create_vpn_user_on_server(user_id: int, plan_id: str) -> tuple:
-    """Создание пользователя на 3x-ui"""
+def create_vpn_user(user_id: int, plan_id: str) -> tuple:
+    """Создание пользователя"""
     user_uuid = str(uuid.uuid4())
     email = f"user_{user_id}_{int(datetime.now().timestamp())}"
     
     plan = PLANS[plan_id]
     expiry_time = int((datetime.now() + timedelta(days=plan['days'])).timestamp() * 1000)
     
-    # Создаем клиента
-    client_created = False
-    if xray_api:
-        client_created = xray_api.add_client(user_uuid, email, expiry_time, int(XRAY_INBOUND_ID))
-        if client_created:
-            logger.info(f"✅ Клиент создан: {email}")
-        else:
-            logger.warning(f"⚠️ Не удалось создать клиента")
+    # Пытаемся создать клиента
+    success = xray_api.add_client(user_uuid, email, expiry_time)
     
-    # Генерируем VLESS ссылку
+    if success:
+        logger.info(f"✅ Клиент создан: {email}")
+    else:
+        logger.warning(f"⚠️ Клиент НЕ создан! Но ключ будет сгенерирован для теста")
+    
     vless_link = generate_vless_link(user_uuid, email)
-    
     return vless_link, user_uuid, email
 
-# ======================= ФУНКЦИИ ДЛЯ ЮKASSA =======================
-async def create_yookassa_payment(user_id: int, plan_id: str, amount: int) -> Dict:
-    idempotence_key = hashlib.md5(f"{user_id}_{plan_id}_{datetime.now().timestamp()}".encode()).hexdigest()
-    
-    payment_data = {
-        "amount": {
-            "value": f"{amount}.00",
-            "currency": "RUB"
-        },
-        "confirmation": {
-            "type": "redirect",
-            "return_url": YKASSA_WEBHOOK_URL
-        },
-        "capture": True,
-        "description": f"Подписка VPN {plan_id} для пользователя {user_id}",
-        "metadata": {
-            "user_id": str(user_id),
-            "plan_id": plan_id
-        }
-    }
-    
-    auth = base64.b64encode(f"{YKASSA_SHOP_ID}:{YKASSA_SECRET_KEY}".encode()).decode()
-    headers = {
-        "Content-Type": "application/json",
-        "Idempotence-Key": idempotence_key,
-        "Authorization": f"Basic {auth}"
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.post(YKASSA_API_URL, json=payment_data, headers=headers) as response:
-            if response.status == 200:
-                data = await response.json()
-                return {
-                    'id': data['id'],
-                    'confirmation_url': data['confirmation']['confirmation_url']
-                }
-            else:
-                error_text = await response.text()
-                logger.error(f"Ошибка ЮKassa: {response.status} - {error_text}")
-                raise Exception(f"Ошибка создания платежа: {response.status}")
-
-async def check_yookassa_payment(payment_id: str) -> str:
-    auth = base64.b64encode(f"{YKASSA_SHOP_ID}:{YKASSA_SECRET_KEY}".encode()).decode()
-    headers = {
-        "Authorization": f"Basic {auth}"
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{YKASSA_API_URL}/{payment_id}", headers=headers) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data.get('status', 'unknown')
-            else:
-                return 'error'
-
-# ======================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =======================
+# ======================= ФУНКЦИИ БД =======================
 def get_user(user_id: int) -> Optional[Dict]:
     conn = sqlite3.connect('subscriptions.db')
     c = conn.cursor()
@@ -401,8 +304,7 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     start_date = datetime.now()
     end_date = start_date + timedelta(days=plan['days'])
     
-    # Создаем пользователя на сервере
-    vpn_key, user_uuid, client_id = create_vpn_user_on_server(user_id, plan_id)
+    vpn_key, user_uuid, client_id = create_vpn_user(user_id, plan_id)
     
     subscription_uuid = str(uuid.uuid4())
     
@@ -444,26 +346,6 @@ def get_user_vpn_keys(user_id: int) -> list:
     conn.close()
     return keys
 
-def create_payment(user_id: int, plan_id: str, amount: int, payment_id: str):
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("""INSERT INTO payments 
-                 (payment_id, user_id, plan_id, amount, status, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?)""",
-              (payment_id, user_id, plan_id, amount, 'pending', datetime.now()))
-    conn.commit()
-    conn.close()
-
-def update_payment_status(payment_id: str, status: str):
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("""UPDATE payments 
-                 SET status = ?, paid_at = ?
-                 WHERE payment_id = ?""",
-              (status, datetime.now() if status == 'succeeded' else None, payment_id))
-    conn.commit()
-    conn.close()
-
 # ======================= КЛАВИАТУРЫ =======================
 def get_main_keyboard():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -491,14 +373,6 @@ def get_plans_keyboard():
     
     return keyboard
 
-def get_payment_keyboard(payment_id: str, confirmation_url: str):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Оплатить", url=confirmation_url)],
-        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment_{payment_id}")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
-    ])
-    return keyboard
-
 def get_keys_keyboard():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Обновить ключи", callback_data="refresh_keys")],
@@ -506,7 +380,7 @@ def get_keys_keyboard():
     ])
     return keyboard
 
-# ======================= ОБРАБОТЧИКИ КОМАНД =======================
+# ======================= ОБРАБОТЧИКИ =======================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -521,15 +395,13 @@ async def cmd_start(message: types.Message):
     welcome_text = f"""
 🌟 <b>Добро пожаловать в VPN сервис Kildear!</b>
 
-Защитите свои данные и получите доступ к любому контенту.
-
 📋 <b>Доступные тарифы:</b>
 • 🎁 2 дня бесплатно
 • 🔥 1 месяц — 139 ₽
 • ⭐ 3 месяца — 469 ₽
 • 💎 1 год — 899 ₽
 
-Используйте кнопки ниже для управления подпиской.
+Используйте кнопки ниже.
 """
     
     await message.answer(
@@ -541,7 +413,7 @@ async def cmd_start(message: types.Message):
 @dp.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: CallbackQuery):
     await callback.message.edit_text(
-        "🏠 <b>Главное меню</b>\n\nВыберите действие:",
+        "🏠 <b>Главное меню</b>",
         reply_markup=get_main_keyboard(),
         parse_mode="HTML"
     )
@@ -551,25 +423,20 @@ async def back_to_main(callback: CallbackQuery):
 async def show_plans(callback: CallbackQuery):
     active_sub = get_active_subscription(callback.from_user.id)
     
-    plans_text = "📱 <b>Выберите тарифный план:</b>\n\n"
+    plans_text = "📱 <b>Выберите тариф:</b>\n\n"
     
     if active_sub:
         try:
             end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
             days_left = (end_date - datetime.now()).days
             if days_left > 0:
-                plans_text += f"✅ <i>У вас активна подписка до {end_date.strftime('%d.%m.%Y')} (осталось {days_left} дней)</i>\n\n"
-            else:
-                plans_text += f"⏰ <i>Подписка истекла {end_date.strftime('%d.%m.%Y')}</i>\n\n"
+                plans_text += f"✅ Активна до {end_date.strftime('%d.%m.%Y')} (осталось {days_left} дн.)\n\n"
         except:
             pass
     
     for plan_id, plan in PLANS.items():
         price_text = f"{plan['price']} ₽" if plan['price'] > 0 else "Бесплатно"
-        plans_text += f"{plan['emoji']} <b>{plan['label']}</b>\n"
-        plans_text += f"   • 📅 {plan['days']} дней\n"
-        plans_text += f"   • 📱 {plan['devices']} устройств\n"
-        plans_text += f"   • 💰 {price_text}\n\n"
+        plans_text += f"{plan['emoji']} {plan['label']} — {price_text}\n"
     
     await callback.message.edit_text(
         plans_text,
@@ -584,12 +451,7 @@ async def show_keys(callback: CallbackQuery):
     keys = get_user_vpn_keys(user_id)
     
     if not keys:
-        keys_text = """
-🔑 <b>У вас нет активных VPN ключей</b>
-
-Для получения ключа необходимо приобрести подписку.
-Нажмите "📱 Купить подписку" чтобы выбрать тариф.
-"""
+        keys_text = "🔑 <b>Нет активных ключей</b>\n\nКупите подписку."
         await callback.message.edit_text(
             keys_text,
             reply_markup=get_keys_keyboard(),
@@ -598,11 +460,11 @@ async def show_keys(callback: CallbackQuery):
         await callback.answer()
         return
     
-    keys_text = "🔑 <b>Ваши активные VPN ключи:</b>\n\n"
+    keys_text = "🔑 <b>Ваши ключи:</b>\n\n"
     
     for idx, key_data in enumerate(keys, 1):
         try:
-            key, expires_at, status, devices, port = key_data[0], key_data[1], key_data[2], key_data[3], key_data[4] if len(key_data) > 4 else "?"
+            key, expires_at, status, devices, port = key_data
             
             expires = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S.%f')
             days_left = (expires - datetime.now()).days
@@ -610,16 +472,9 @@ async def show_keys(callback: CallbackQuery):
             keys_text += f"<b>Ключ #{idx}</b>\n"
             keys_text += f"<code>{key}</code>\n"
             keys_text += f"📱 Устройств: {devices}\n"
-            keys_text += f"🔌 Порт: {port}\n"
-            keys_text += f"⏳ Действует до: {expires.strftime('%d.%m.%Y')}\n"
-            keys_text += f"📊 Осталось: {days_left} дней\n"
-            keys_text += "\n📌 <b>Инструкция:</b>\n"
-            keys_text += "1. Скопируйте ключ полностью\n"
-            keys_text += "2. Вставьте в приложение (V2RayNG, Nekoray, Shadowrocket)\n"
-            keys_text += "3. Подключитесь к серверу\n\n"
-            keys_text += "➖➖➖➖➖➖➖➖➖➖➖➖\n\n"
+            keys_text += f"⏳ До: {expires.strftime('%d.%m.%Y')} ({days_left} дн.)\n\n"
         except Exception as e:
-            logger.error(f"Ошибка форматирования ключа: {e}")
+            logger.error(f"Ошибка: {e}")
     
     await callback.message.edit_text(
         keys_text,
@@ -635,8 +490,7 @@ async def show_subscription(callback: CallbackQuery):
     
     if not active_sub:
         await callback.message.edit_text(
-            "❌ <b>У вас нет активной подписки</b>\n\n"
-            "Купите подписку, чтобы получить ссылку для импорта в приложение.",
+            "❌ <b>Нет активной подписки</b>",
             reply_markup=get_main_keyboard(),
             parse_mode="HTML"
         )
@@ -645,57 +499,43 @@ async def show_subscription(callback: CallbackQuery):
     
     subscription_url = f"{SUBSCRIPTION_URL}/{active_sub.get('subscription_uuid', '')}"
     
-    subscription_text = f"""
-📥 <b>Ваша ссылка для подписки</b>
+    text = f"""
+📥 <b>Ссылка для подписки:</b>
 
-🔗 <code>{subscription_url}</code>
+<code>{subscription_url}</code>
 
-📌 <b>Как использовать:</b>
-1. Скопируйте ссылку
-2. Вставьте в приложение:
-   • V2RayNG: Нажмите "+" → "Import from URL"
-   • Nekoray: Нажмите "Add" → "Subscription"
-   • Shadowrocket: Нажмите "+" → "Subscribe"
-   • Hiddify: Нажмите "Add" → "Subscription URL"
-3. Приложение автоматически загрузит все ключи
-
-📅 Действует до: {datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')}
-🔌 Порт: {active_sub.get('port', '?')}
-
-⚠️ <b>Важно:</b> Ссылка персональная, не передавайте её другим.
+📅 До: {datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')}
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Копировать ссылку", callback_data=f"copy_subscription_{active_sub.get('subscription_uuid', '')}")],
+        [InlineKeyboardButton(text="📋 Копировать", callback_data=f"copy_sub_{active_sub.get('subscription_uuid', '')}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     
     await callback.message.edit_text(
-        subscription_text,
+        text,
         reply_markup=keyboard,
         parse_mode="HTML"
     )
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("copy_subscription_"))
-async def copy_subscription(callback: CallbackQuery):
-    subscription_uuid = callback.data.replace("copy_subscription_", "")
-    subscription_url = f"{SUBSCRIPTION_URL}/{subscription_uuid}"
+@dp.callback_query(F.data.startswith("copy_sub_"))
+async def copy_sub(callback: CallbackQuery):
+    uuid_val = callback.data.replace("copy_sub_", "")
+    url = f"{SUBSCRIPTION_URL}/{uuid_val}"
     
     await callback.message.answer(
-        f"🔗 <b>Ссылка для подписки:</b>\n\n"
-        f"<code>{subscription_url}</code>\n\n"
-        f"Просто скопируйте эту ссылку и вставьте в ваше приложение.",
+        f"🔗 <code>{url}</code>",
         parse_mode="HTML"
     )
-    await callback.answer("✅ Ссылка отправлена!")
+    await callback.answer("✅ Скопируйте!")
 
 @dp.callback_query(F.data == "refresh_keys")
 async def refresh_keys(callback: CallbackQuery):
     await show_keys(callback)
 
 @dp.callback_query(F.data.startswith("plan_"))
-async def process_plan_selection(callback: CallbackQuery):
+async def process_plan(callback: CallbackQuery):
     plan_id = callback.data.replace("plan_", "")
     plan = PLANS.get(plan_id)
     
@@ -705,6 +545,7 @@ async def process_plan_selection(callback: CallbackQuery):
     
     user_id = callback.from_user.id
     
+    # Бесплатный тариф
     if plan['price'] == 0:
         conn = sqlite3.connect('subscriptions.db')
         c = conn.cursor()
@@ -716,134 +557,85 @@ async def process_plan_selection(callback: CallbackQuery):
             await callback.answer("❌ Вы уже использовали бесплатный период!", show_alert=True)
             return
         
+        # Активируем
         create_subscription(user_id, plan_id, 0)
         
         active_sub = get_active_subscription(user_id)
         vpn_key = active_sub.get('vpn_key') if active_sub else None
         
-        success_text = f"""
-🎉 <b>Поздравляем! Бесплатная подписка активирована!</b>
+        text = f"""
+🎉 <b>Бесплатная подписка активирована!</b>
 
-📅 Период: {plan['days']} дней
-📱 Устройств: {plan['devices']}
+📅 {plan['days']} дней
 🔌 Порт: {VPN_SERVER_PORT}
 
-🔑 <b>Ваш VPN ключ:</b>
+🔑 <b>Ключ:</b>
 <code>{vpn_key}</code>
-
-📌 <b>Инструкция:</b>
-1. Скопируйте ключ
-2. Вставьте в приложение
-3. Подключитесь
-
-Ключ также доступен в разделе "Мои ключи".
 """
         
         await callback.message.edit_text(
-            success_text,
+            text,
             reply_markup=get_main_keyboard(),
             parse_mode="HTML"
         )
         await callback.answer()
         return
     
-    try:
-        payment_data = await create_yookassa_payment(
-            user_id=user_id,
-            plan_id=plan_id,
-            amount=plan['price']
-        )
-        
-        create_payment(user_id, plan_id, plan['price'], payment_data['id'])
-        
-        payment_text = f"""
-💳 <b>Оплата подписки через ЮKassa</b>
+    # Платный - тестовая активация
+    text = f"""
+💳 <b>Оплата подписки</b>
 
 Тариф: {plan['label']}
 Сумма: {plan['price']} ₽
-Период: {plan['days']} дней
 
-Нажмите на кнопку ниже для оплаты.
-После оплаты нажмите "Проверить оплату".
+⚠️ Тестовый режим
 """
-        
-        await callback.message.edit_text(
-            payment_text,
-            reply_markup=get_payment_keyboard(payment_data['id'], payment_data['confirmation_url']),
-            parse_mode="HTML"
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка при создании платежа: {e}")
-        await callback.message.edit_text(
-            f"❌ <b>Ошибка при создании платежа</b>\n\n{str(e)}",
-            reply_markup=get_main_keyboard(),
-            parse_mode="HTML"
-        )
     
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Тестовая активация", callback_data=f"test_{plan_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+    ])
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("check_payment_"))
-async def check_payment_status(callback: CallbackQuery):
-    payment_id = callback.data.replace("check_payment_", "")
+@dp.callback_query(F.data.startswith("test_"))
+async def test_activate(callback: CallbackQuery):
+    plan_id = callback.data.replace("test_", "")
+    plan = PLANS.get(plan_id)
     user_id = callback.from_user.id
     
-    try:
-        status = await check_yookassa_payment(payment_id)
-        
-        if status == 'succeeded':
-            conn = sqlite3.connect('subscriptions.db')
-            c = conn.cursor()
-            c.execute("SELECT plan_id, amount FROM payments WHERE payment_id = ?", (payment_id,))
-            payment_info = c.fetchone()
-            conn.close()
-            
-            if payment_info:
-                plan_id = payment_info[0]
-                update_payment_status(payment_id, 'succeeded')
-                create_subscription(user_id, plan_id, payment_info[1], payment_id)
-                
-                active_sub = get_active_subscription(user_id)
-                vpn_key = active_sub.get('vpn_key') if active_sub else None
-                plan = PLANS[plan_id]
-                subscription_uuid = active_sub.get('subscription_uuid') if active_sub else ""
-                
-                success_text = f"""
-✅ <b>Оплата прошла успешно!</b>
+    if not plan:
+        await callback.answer("❌ Ошибка")
+        return
+    
+    # Активируем
+    create_subscription(user_id, plan_id, plan['price'], "test")
+    
+    active_sub = get_active_subscription(user_id)
+    vpn_key = active_sub.get('vpn_key') if active_sub else None
+    
+    text = f"""
+✅ <b>Подписка активирована!</b>
 
-🎉 Подписка на тариф «{plan['label']}» активирована!
-📅 Период: {plan['days']} дней
-📱 Устройств: {plan['devices']}
+🎉 {plan['label']}
+📅 {plan['days']} дней
 🔌 Порт: {VPN_SERVER_PORT}
 
-🔑 <b>Ваш VPN ключ:</b>
+🔑 <b>Ключ:</b>
 <code>{vpn_key}</code>
-
-📥 <b>Ссылка для подписки:</b>
-<code>{SUBSCRIPTION_URL}/{subscription_uuid}</code>
-
-📌 <b>Инструкция:</b>
-1. Скопируйте ключ или ссылку
-2. Вставьте в приложение
-3. Подключитесь
-
-Спасибо за покупку! 🔒
 """
-                await callback.message.edit_text(
-                    success_text,
-                    reply_markup=get_main_keyboard(),
-                    parse_mode="HTML"
-                )
-            else:
-                await callback.answer("❌ Платеж не найден", show_alert=True)
-        elif status == 'pending':
-            await callback.answer("⏳ Платеж еще не обработан. Попробуйте позже.", show_alert=True)
-        else:
-            await callback.answer("❌ Платеж не прошел. Попробуйте снова.", show_alert=True)
-            
-    except Exception as e:
-        logger.error(f"Ошибка при проверке платежа: {e}")
-        await callback.answer("❌ Ошибка при проверке платежа", show_alert=True)
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_main_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
 @dp.callback_query(F.data == "my_profile")
 async def show_profile(callback: CallbackQuery):
@@ -852,50 +644,40 @@ async def show_profile(callback: CallbackQuery):
     active_sub = get_active_subscription(user_id)
     keys = get_user_vpn_keys(user_id)
     
-    if not user:
-        await callback.answer("❌ Пользователь не найден")
-        return
-    
-    profile_text = f"""
-👤 <b>Ваш профиль</b>
+    text = f"""
+👤 <b>Профиль</b>
 
-🆔 ID: {user['user_id']}
-📝 Имя: {user['first_name']}
+🆔 ID: {user_id}
+📝 Имя: {user['first_name'] if user else '?'}
 """
-    
-    if user['username']:
-        profile_text += f"📌 @{user['username']}\n"
-    
+
     if active_sub:
         try:
             end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
             days_left = (end_date - datetime.now()).days
             plan = PLANS.get(active_sub['plan_id'], {})
             
-            profile_text += f"""
-📱 <b>Текущая подписка</b>
-• Тариф: {plan.get('label', active_sub['plan_id'])}
-• Действует до: {end_date.strftime('%d.%m.%Y')}
-• Осталось дней: {days_left if days_left > 0 else 0}
-• Устройств: {plan.get('devices', 1)}
+            text += f"""
+📱 <b>Подписка</b>
+• {plan.get('label', '?')}
+• До: {end_date.strftime('%d.%m.%Y')} ({days_left} дн.)
 • Порт: {active_sub.get('port', '?')}
 """
         except:
-            profile_text += "\n❌ <b>Ошибка чтения данных подписки</b>"
+            pass
     else:
-        profile_text += "\n❌ <b>Нет активной подписки</b>"
+        text += "\n❌ Нет подписки"
     
-    profile_text += f"\n🔑 <b>Всего активных ключей:</b> {len(keys)}"
+    text += f"\n🔑 Ключей: {len(keys)}"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="buy_subscription")],
-        [InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys")],
-        [InlineKeyboardButton(text="📥 Ссылка для подписки", callback_data="my_subscription")],
+        [InlineKeyboardButton(text="🔄 Купить", callback_data="buy_subscription")],
+        [InlineKeyboardButton(text="🔑 Ключи", callback_data="my_keys")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     
     await callback.message.edit_text(
-        profile_text,
+        text,
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -903,34 +685,14 @@ async def show_profile(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "help")
 async def show_help(callback: CallbackQuery):
-    help_text = """
+    text = """
 🆘 <b>Помощь</b>
 
-<b>Как купить подписку?</b>
-1. Нажмите "📱 Купить подписку"
+1. Нажмите "Купить подписку"
 2. Выберите тариф
-3. Оплатите через ЮKassa
-4. После оплаты нажмите "Проверить оплату"
+3. Для теста нажмите "Тестовая активация"
 
-<b>Как получить VPN ключ?</b>
-После оплаты подписки ключ придет в сообщении.
-Вы также можете посмотреть его в разделе "Мои ключи".
-
-<b>Как использовать ссылку для подписки?</b>
-1. Перейдите в раздел "📥 Ссылка для подписки"
-2. Скопируйте ссылку
-3. Вставьте в приложение:
-   • V2RayNG: "+" → "Import from URL"
-   • Nekoray: "Add" → "Subscription"
-   • Shadowrocket: "+" → "Subscribe"
-   • Hiddify: "Add" → "Subscription URL"
-4. Приложение загрузит все ключи автоматически
-
-<b>Бесплатный период</b>
-Вы можете получить 2 дня бесплатно.
-
-<b>Вопросы и поддержка</b>
-📧 support@kildear.com
+Ключ появится в "Мои ключи".
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -938,62 +700,13 @@ async def show_help(callback: CallbackQuery):
     ])
     
     await callback.message.edit_text(
-        help_text,
+        text,
         reply_markup=keyboard,
         parse_mode="HTML"
     )
     await callback.answer()
 
-# ======================= WEBHOOK ДЛЯ ЮKASSA =======================
-async def yookassa_webhook(request):
-    try:
-        data = await request.json()
-        logger.info(f"Получен вебхук от ЮKassa: {data}")
-        
-        event = data.get('event')
-        payment_data = data.get('object', {})
-        payment_id = payment_data.get('id')
-        status = payment_data.get('status')
-        
-        if event == 'payment.succeeded':
-            update_payment_status(payment_id, 'succeeded')
-            
-            conn = sqlite3.connect('subscriptions.db')
-            c = conn.cursor()
-            c.execute("SELECT user_id, plan_id, amount FROM payments WHERE payment_id = ?", (payment_id,))
-            payment_info = c.fetchone()
-            conn.close()
-            
-            if payment_info:
-                user_id, plan_id, amount = payment_info
-                create_subscription(user_id, plan_id, amount, payment_id)
-                
-                active_sub = get_active_subscription(user_id)
-                vpn_key = active_sub.get('vpn_key') if active_sub else None
-                subscription_uuid = active_sub.get('subscription_uuid') if active_sub else ""
-                plan = PLANS[plan_id]
-                
-                try:
-                    await bot.send_message(
-                        user_id,
-                        f"✅ <b>Оплата прошла успешно!</b>\n\n"
-                        f"🎉 Подписка на тариф «{plan['label']}» активирована!\n"
-                        f"📅 Период: {plan['days']} дней\n"
-                        f"🔌 Порт: {VPN_SERVER_PORT}\n"
-                        f"🔑 <b>Ваш VPN ключ:</b>\n<code>{vpn_key}</code>\n\n"
-                        f"📥 <b>Ссылка для подписки:</b>\n<code>{SUBSCRIPTION_URL}/{subscription_uuid}</code>\n\n"
-                        f"Ключ и ссылка также доступны в меню бота.",
-                        parse_mode="HTML"
-                    )
-                except Exception as e:
-                    logger.error(f"Не удалось отправить уведомление: {e}")
-        
-        return web.Response(status=200)
-    except Exception as e:
-        logger.error(f"Ошибка в вебхуке ЮKassa: {e}")
-        return web.Response(status=500)
-
-# ======================= ОБРАБОТЧИК ВЕБХУКА ТЕЛЕГРАМ =======================
+# ======================= WEBHOOK =======================
 async def webhook_handler(request):
     try:
         data = await request.json()
@@ -1001,26 +714,24 @@ async def webhook_handler(request):
         await dp.feed_update(bot, update)
         return web.Response(status=200)
     except Exception as e:
-        logger.error(f"Ошибка в вебхуке: {e}")
+        logger.error(f"Ошибка: {e}")
         return web.Response(status=500)
 
-# ======================= ЗАПУСК БОТА =======================
+# ======================= ЗАПУСК =======================
 async def on_startup():
     webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost')}/webhook"
-    
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await bot.set_webhook(webhook_url)
-        logger.info(f"✅ Вебхук установлен: {webhook_url}")
+        logger.info(f"✅ Вебхук: {webhook_url}")
     except Exception as e:
-        logger.error(f"Ошибка установки вебхука: {e}")
+        logger.error(f"Ошибка: {e}")
 
 async def main():
     port = int(os.environ.get('PORT', 8080))
     
     app = web.Application()
     app.router.add_post('/webhook', webhook_handler)
-    app.router.add_post('/webhook/yookassa', yookassa_webhook)
     app.router.add_get('/', lambda request: web.Response(text='Bot is running!'))
     
     await on_startup()
@@ -1030,11 +741,9 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     
-    logger.info(f"✅ Бот запущен на порту {port}")
-    logger.info(f"✅ 3x-ui панель: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}")
-    logger.info(f"✅ Inbound Kildear VPN (ID={XRAY_INBOUND_ID})")
-    logger.info(f"✅ Порт: {VPN_SERVER_PORT}")
-    logger.info(f"✅ Клиенты: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}/panel/clients")
+    logger.info(f"🚀 Бот запущен на порту {port}")
+    logger.info(f"📡 Панель: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}")
+    logger.info(f"📡 Inbound ID: {XRAY_INBOUND_ID}")
     
     try:
         await asyncio.Event().wait()
