@@ -12,6 +12,8 @@ from aiogram import F
 import aiohttp
 import base64
 import hashlib
+import secrets
+import string
 
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
@@ -21,6 +23,10 @@ YKASSA_SHOP_ID = os.environ.get("YKASSA_SHOP_ID", "1434221")
 YKASSA_SECRET_KEY = os.environ.get("YKASSA_SECRET_KEY", "live_fH2K3m3SygBdP8P6bjaOwkRj4UKl5FwsatLZC-PJKt8")
 YKASSA_API_URL = "https://api.yookassa.ru/v3/payments"
 YKASSA_WEBHOOK_URL = os.environ.get("YKASSA_WEBHOOK_URL", "https://kildear-vpn-bot.onrender.com/webhook/yookassa")
+
+# Настройки VPN ключей
+VPN_KEY_LENGTH = 32  # Длина ключа
+VPN_KEY_PREFIX = "KILDEAR-"  # Префикс ключа
 
 # ======================= ТАРИФЫ =======================
 PLANS = {
@@ -64,6 +70,7 @@ def init_db():
                   status TEXT,
                   price INTEGER,
                   payment_id TEXT,
+                  vpn_key TEXT,
                   FOREIGN KEY (user_id) REFERENCES users (user_id))''')
     
     # Таблица платежей
@@ -78,10 +85,79 @@ def init_db():
                   paid_at TIMESTAMP,
                   FOREIGN KEY (user_id) REFERENCES users (user_id))''')
     
+    # Таблица VPN ключей
+    c.execute('''CREATE TABLE IF NOT EXISTS vpn_keys
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  key TEXT UNIQUE,
+                  user_id INTEGER,
+                  subscription_id INTEGER,
+                  created_at TIMESTAMP,
+                  expires_at TIMESTAMP,
+                  status TEXT DEFAULT 'active',
+                  devices INTEGER DEFAULT 1,
+                  FOREIGN KEY (user_id) REFERENCES users (user_id),
+                  FOREIGN KEY (subscription_id) REFERENCES subscriptions (id))''')
+    
     conn.commit()
     conn.close()
 
 init_db()
+
+# ======================= ГЕНЕРАЦИЯ VPN КЛЮЧЕЙ =======================
+def generate_vpn_key() -> str:
+    """Генерация уникального VPN ключа"""
+    alphabet = string.ascii_uppercase + string.digits
+    random_part = ''.join(secrets.choice(alphabet) for _ in range(VPN_KEY_LENGTH))
+    return f"{VPN_KEY_PREFIX}{random_part}"
+
+def is_key_unique(key: str) -> bool:
+    """Проверка уникальности ключа"""
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM vpn_keys WHERE key = ?", (key,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count == 0
+
+def get_unique_vpn_key() -> str:
+    """Генерация уникального VPN ключа с проверкой"""
+    max_attempts = 10
+    for _ in range(max_attempts):
+        key = generate_vpn_key()
+        if is_key_unique(key):
+            return key
+    raise Exception("Не удалось сгенерировать уникальный ключ")
+
+def save_vpn_key(user_id: int, subscription_id: int, key: str, expires_at: datetime, devices: int = 1):
+    """Сохранение VPN ключа в БД"""
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    c.execute("""INSERT INTO vpn_keys 
+                 (key, user_id, subscription_id, created_at, expires_at, status, devices)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
+              (key, user_id, subscription_id, datetime.now(), expires_at, 'active', devices))
+    conn.commit()
+    conn.close()
+    return key
+
+def get_user_vpn_keys(user_id: int) -> list:
+    """Получение всех активных VPN ключей пользователя"""
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    c.execute("""SELECT key, expires_at, status, devices FROM vpn_keys 
+                 WHERE user_id = ? AND status = 'active'
+                 ORDER BY created_at DESC""", (user_id,))
+    keys = c.fetchall()
+    conn.close()
+    return keys
+
+def deactivate_vpn_key(key: str):
+    """Деактивация VPN ключа"""
+    conn = sqlite3.connect('subscriptions.db')
+    c = conn.cursor()
+    c.execute("UPDATE vpn_keys SET status = 'inactive' WHERE key = ?", (key,))
+    conn.commit()
+    conn.close()
 
 # ======================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =======================
 def get_user(user_id: int) -> Optional[Dict]:
@@ -132,11 +208,12 @@ def get_active_subscription(user_id: int) -> Optional[Dict]:
             'end_date': sub[4],
             'status': sub[5],
             'price': sub[6],
-            'payment_id': sub[7]
+            'payment_id': sub[7],
+            'vpn_key': sub[8] if len(sub) > 8 else None
         }
     return None
 
-def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str = None):
+def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str = None) -> int:
     plan = PLANS[plan_id]
     start_date = datetime.now()
     end_date = start_date + timedelta(days=plan['days'])
@@ -149,9 +226,18 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     
     # Создаем новую подписку
     c.execute("""INSERT INTO subscriptions 
-                 (user_id, plan_id, start_date, end_date, status, price, payment_id)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
-              (user_id, plan_id, start_date, end_date, 'active', price, payment_id))
+                 (user_id, plan_id, start_date, end_date, status, price, payment_id, vpn_key)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+              (user_id, plan_id, start_date, end_date, 'active', price, payment_id, None))
+    
+    subscription_id = c.lastrowid
+    
+    # Генерируем и сохраняем VPN ключ
+    vpn_key = get_unique_vpn_key()
+    save_vpn_key(user_id, subscription_id, vpn_key, end_date, plan['devices'])
+    
+    # Обновляем подписку с ключом
+    c.execute("UPDATE subscriptions SET vpn_key = ? WHERE id = ?", (vpn_key, subscription_id))
     
     # Обновляем пользователя
     c.execute("""UPDATE users 
@@ -161,6 +247,8 @@ def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str 
     
     conn.commit()
     conn.close()
+    
+    return subscription_id
 
 def create_payment(user_id: int, plan_id: str, amount: int, payment_id: str):
     conn = sqlite3.connect('subscriptions.db')
@@ -186,6 +274,7 @@ def update_payment_status(payment_id: str, status: str):
 def get_main_keyboard():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Купить подписку", callback_data="buy_subscription")],
+        [InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys")],
         [InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile")],
         [InlineKeyboardButton(text="🆘 Помощь", callback_data="help")]
     ])
@@ -212,6 +301,13 @@ def get_payment_keyboard(payment_id: str, confirmation_url: str):
         [InlineKeyboardButton(text="💳 Оплатить", url=confirmation_url)],
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment_{payment_id}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_plans")]
+    ])
+    return keyboard
+
+def get_keys_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить ключи", callback_data="refresh_keys")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     return keyboard
 
@@ -284,6 +380,58 @@ async def show_plans(callback: CallbackQuery):
     )
     await callback.answer()
 
+@dp.callback_query(F.data == "my_keys")
+async def show_keys(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    keys = get_user_vpn_keys(user_id)
+    
+    if not keys:
+        keys_text = """
+🔑 <b>У вас нет активных VPN ключей</b>
+
+Для получения ключа необходимо приобрести подписку.
+Нажмите "📱 Купить подписку" чтобы выбрать тариф.
+"""
+        await callback.message.edit_text(
+            keys_text,
+            reply_markup=get_keys_keyboard(),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    
+    # Форматируем ключи
+    keys_text = "🔑 <b>Ваши активные VPN ключи:</b>\n\n"
+    
+    for idx, (key, expires_at, status, devices) in enumerate(keys, 1):
+        expires = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S.%f')
+        days_left = (expires - datetime.now()).days
+        
+        keys_text += f"<b>Ключ #{idx}</b>\n"
+        keys_text += f"<code>{key}</code>\n"
+        keys_text += f"📱 Устройств: {devices}\n"
+        keys_text += f"⏳ Действует до: {expires.strftime('%d.%m.%Y')}\n"
+        keys_text += f"📊 Осталось: {days_left} дней\n"
+        
+        # Инструкция по использованию
+        keys_text += f"\n📌 <b>Инструкция:</b>\n"
+        keys_text += f"1. Скачайте приложение VPN\n"
+        keys_text += f"2. Введите ключ: <code>{key}</code>\n"
+        keys_text += f"3. Подключитесь к серверу\n\n"
+        
+        keys_text += "➖➖➖➖➖➖➖➖➖➖➖➖\n\n"
+    
+    await callback.message.edit_text(
+        keys_text,
+        reply_markup=get_keys_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "refresh_keys")
+async def refresh_keys(callback: CallbackQuery):
+    await show_keys(callback)
+
 @dp.callback_query(F.data.startswith("plan_"))
 async def process_plan_selection(callback: CallbackQuery):
     plan_id = callback.data.replace("plan_", "")
@@ -309,13 +457,31 @@ async def process_plan_selection(callback: CallbackQuery):
             return
         
         # Активируем бесплатную подписку
-        create_subscription(user_id, plan_id, 0)
+        subscription_id = create_subscription(user_id, plan_id, 0)
+        
+        # Получаем сгенерированный ключ
+        active_sub = get_active_subscription(user_id)
+        vpn_key = active_sub.get('vpn_key') if active_sub else None
+        
+        success_text = f"""
+🎉 <b>Поздравляем! Бесплатная подписка активирована!</b>
+
+📅 Период: {plan['days']} дней
+📱 Устройств: {plan['devices']}
+
+🔑 <b>Ваш VPN ключ:</b>
+<code>{vpn_key}</code>
+
+📌 <b>Инструкция по использованию:</b>
+1. Скачайте VPN клиент
+2. Введите ключ: <code>{vpn_key}</code>
+3. Подключитесь к серверу
+
+Ключ также доступен в разделе "Мои ключи".
+"""
         
         await callback.message.edit_text(
-            f"🎉 <b>Поздравляем! Бесплатная подписка активирована!</b>\n\n"
-            f"📅 Период: {plan['days']} дней\n"
-            f"📱 Устройств: {plan['devices']}\n\n"
-            f"Наслаждайтесь безопасным интернетом! 🔒",
+            success_text,
             reply_markup=get_main_keyboard(),
             parse_mode="HTML"
         )
@@ -380,15 +546,33 @@ async def check_payment_status(callback: CallbackQuery):
             if payment_info:
                 plan_id = payment_info[0]
                 update_payment_status(payment_id, 'succeeded')
-                create_subscription(user_id, plan_id, payment_info[1], payment_id)
+                subscription_id = create_subscription(user_id, plan_id, payment_info[1], payment_id)
+                
+                # Получаем сгенерированный ключ
+                active_sub = get_active_subscription(user_id)
+                vpn_key = active_sub.get('vpn_key') if active_sub else None
                 
                 plan = PLANS[plan_id]
+                success_text = f"""
+✅ <b>Оплата прошла успешно!</b>
+
+🎉 Подписка на тариф «{plan['label']}» активирована!
+📅 Период: {plan['days']} дней
+📱 Устройств: {plan['devices']}
+
+🔑 <b>Ваш VPN ключ:</b>
+<code>{vpn_key}</code>
+
+📌 <b>Инструкция по использованию:</b>
+1. Скачайте VPN клиент
+2. Введите ключ: <code>{vpn_key}</code>
+3. Подключитесь к серверу
+
+Ключ также доступен в разделе "Мои ключи".
+Спасибо за покупку! 🔒
+"""
                 await callback.message.edit_text(
-                    f"✅ <b>Оплата прошла успешно!</b>\n\n"
-                    f"🎉 Подписка на тариф «{plan['label']}» активирована!\n"
-                    f"📅 Период: {plan['days']} дней\n"
-                    f"📱 Устройств: {plan['devices']}\n\n"
-                    f"Спасибо за покупку! 🔒",
+                    success_text,
                     reply_markup=get_main_keyboard(),
                     parse_mode="HTML"
                 )
@@ -408,6 +592,7 @@ async def show_profile(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = get_user(user_id)
     active_sub = get_active_subscription(user_id)
+    keys = get_user_vpn_keys(user_id)
     
     profile_text = f"""
 👤 <b>Ваш профиль</b>
@@ -434,8 +619,11 @@ async def show_profile(callback: CallbackQuery):
     else:
         profile_text += "\n❌ <b>Нет активной подписки</b>"
     
+    profile_text += f"\n🔑 <b>Всего ключей:</b> {len(keys)}"
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="buy_subscription")],
+        [InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ])
     
@@ -456,6 +644,10 @@ async def show_help(callback: CallbackQuery):
 2. Выберите тариф
 3. Оплатите через ЮKassa
 
+<b>Как получить VPN ключ?</b>
+После оплаты подписки ключ придет в сообщении.
+Вы также можете посмотреть его в разделе "Мои ключи".
+
 <b>Бесплатный период</b>
 Вы можете получить 2 дня бесплатно, чтобы протестировать сервис.
 
@@ -465,8 +657,9 @@ async def show_help(callback: CallbackQuery):
 
 <b>Важно:</b>
 • После оплаты подписка активируется автоматически
-• Подписка продлевается по истечении срока
-• VPN работает на всех устройствах
+• VPN ключи генерируются индивидуально
+• Ключ можно использовать на всех устройствах
+• Подписка не продлевается автоматически
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -566,20 +759,47 @@ async def yookassa_webhook(request):
             
             if payment_info:
                 user_id, plan_id, amount = payment_info
-                create_subscription(user_id, plan_id, amount, payment_id)
+                subscription_id = create_subscription(user_id, plan_id, amount, payment_id)
+                
+                # Получаем сгенерированный ключ
+                active_sub = get_active_subscription(user_id)
+                vpn_key = active_sub.get('vpn_key') if active_sub else None
+                
+                plan = PLANS[plan_id]
                 
                 # Отправляем уведомление пользователю
                 try:
-                    plan = PLANS[plan_id]
+                    success_text = f"""
+✅ <b>Оплата прошла успешно!</b>
+
+🎉 Подписка на тариф «{plan['label']}» активирована!
+📅 Период: {plan['days']} дней
+📱 Устройств: {plan['devices']}
+
+🔑 <b>Ваш VPN ключ:</b>
+<code>{vpn_key}</code>
+
+📌 <b>Инструкция по использованию:</b>
+1. Скачайте VPN клиент
+2. Введите ключ: <code>{vpn_key}</code>
+3. Подключитесь к серверу
+
+Ключ также доступен в разделе "Мои ключи".
+Спасибо за покупку! 🔒
+"""
                     await bot.send_message(
                         user_id,
-                        f"✅ <b>Оплата прошла успешно!</b>\n\n"
-                        f"🎉 Подписка на тариф «{plan['label']}» активирована!\n"
-                        f"📅 Период: {plan['days']} дней\n"
-                        f"📱 Устройств: {plan['devices']}\n\n"
-                        f"Спасибо за покупку! 🔒",
+                        success_text,
                         parse_mode="HTML"
                     )
+                    
+                    # Отправляем ключ отдельным сообщением для удобства копирования
+                    await bot.send_message(
+                        user_id,
+                        f"🔑 <b>Ваш VPN ключ:</b>\n<code>{vpn_key}</code>",
+                        parse_mode="HTML"
+                    )
+                    
                 except Exception as e:
                     logger.error(f"Не удалось отправить уведомление пользователю: {e}")
         
@@ -590,15 +810,18 @@ async def yookassa_webhook(request):
 
 # ======================= ЗАПУСК БОТА =======================
 async def main():
-    # Настройка вебхука для ЮKassa (если нужно)
-    # Запускаем бота
+    # Запускаем веб-сервер для вебхуков (опционально)
+    app = web.Application()
+    app.router.add_post('/webhook/yookassa', yookassa_webhook)
+    # Запускаем веб-сервер в фоновом режиме
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    logger.info("Вебхук сервер запущен на порту 8080")
+    
+    # Запускаем бота с поллингом
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Запускаем веб-сервер для вебхуков (опционально)
-    # app = web.Application()
-    # app.router.add_post('/webhook/yookassa', yookassa_webhook)
-    # web.run_app(app, host='0.0.0.0', port=8080)
-    
-    # Или запускаем бота с поллингом
     asyncio.run(main())
