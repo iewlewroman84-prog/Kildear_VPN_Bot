@@ -48,6 +48,8 @@ DB_FILE = "users_db.json"
 # ======================= ТАРИФЫ =======================
 PLANS = {
     "2d": {"days": 2, "price": 0, "traffic": 5, "label": "🎁 2 дня бесплатно", "emoji": "🎁"},
+    "1w": {"days": 7, "price": 39, "traffic": 100, "label": "1 неделя", "emoji": "📅"},
+    "2w": {"days": 14, "price": 69, "traffic": 300, "label": "2 недели", "emoji": "📆"},
     "1m": {"days": 30, "price": 139, "traffic": 1000, "label": "1 месяц", "emoji": "🔥"},
     "3m": {"days": 90, "price": 469, "traffic": 1000, "label": "3 месяца", "emoji": "⭐"},
     "1y": {"days": 365, "price": 899, "traffic": 1000, "label": "1 год", "emoji": "💎"},
@@ -396,7 +398,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 📊 До 1 ТБ трафика
 
 🎁 Попробуй **2 дня бесплатно!**
-💰 Цены от 139 ₽ в месяц
+💰 Цены от 39 ₽ в неделю
 
 Выбери действие в меню ниже 👇
     """
