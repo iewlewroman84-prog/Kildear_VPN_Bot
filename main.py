@@ -1,632 +1,862 @@
 import os
-import logging
-import sqlite3
-import secrets as pysecrets
-from datetime import datetime, timedelta
-from typing import Dict, Optional
-import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.filters import Command
-from aiogram import F
 import json
+import logging
 import uuid
-import requests
-import urllib3
-from aiohttp import web
+import time
+import random
+import string
+import base64
+from datetime import datetime, timedelta
+from typing import Dict, Optional, Tuple
+from io import BytesIO
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    ConversationHandler
+)
+from bs4 import BeautifulSoup
+import qrcode
 
 # ======================= НАСТРОЙКИ =======================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo")
+BOT_TOKEN = "8656434661:AAHv3yKPvStdiSDcSiBJPxKaYSgmJLtBlpo"
 
-XRAY_PANEL_URL = os.environ.get("XRAY_PANEL_URL", "https://2.26.70.65:55347")
-XRAY_PANEL_PATH = os.environ.get("XRAY_PANEL_PATH", "/mMH522DscvfBbpFwaA")
-XRAY_USERNAME = os.environ.get("XRAY_USERNAME", "fHRTAk9lFz")
-XRAY_PASSWORD = os.environ.get("XRAY_PASSWORD", "pM0xjYSy4N")
-XRAY_INBOUND_ID = int(os.environ.get("XRAY_INBOUND_ID", "2"))
+# 3xUI панель
+PANEL_URL = "https://2.26.70.65:55347/mMH522DscvfBbpFwaA"
+PANEL_SUB_URL = "https://2.26.70.65:2096/sub"
+PANEL_USERNAME = "fHRTAk9lFz"
+PANEL_PASSWORD = "pM0xjYSy4N"
+PANEL_API_TOKEN = "tlZpRhpGQA54Uyta9p9chp42oymKG8NjoauzprvEqHSHqrye"
+PANEL_INBOUND_ID = 2
 
-VPN_SERVER_IP = os.environ.get("VPN_SERVER_IP", "2.26.70.65")
-VPN_SERVER_PORT = os.environ.get("VPN_SERVER_PORT", "40224")
-VPN_DOMAIN = os.environ.get("VPN_DOMAIN", "2.26.70.65")
-VPN_PATH = os.environ.get("VPN_PATH", "/mMH522DscvfBbpFwaA")
-SUBSCRIPTION_BASE_URL = os.environ.get("SUBSCRIPTION_BASE_URL", "https://2.26.70.65:2096/sub/")
+# ЮKassa
+YKASSA_SHOP_ID = "1434221"
+YKASSA_SECRET_KEY = "live_fH2K3m3SygBdP8P6bjaOwkRj4UKl5FwsatLZC-PJKt8"
+YKASSA_API_URL = "https://api.yookassa.ru/v3/payments"
+
+# Поддержка
+SUPPORT_USERNAME = "kildear_vpn"
+
+DB_FILE = "users_db.json"
 
 # ======================= ТАРИФЫ =======================
 PLANS = {
-    "2d": {"days": 2, "price": 0, "devices": 1, "label": "🎁 2 дня бесплатно", "emoji": "🎁"},
-    "1m": {"days": 30, "price": 139, "devices": 2, "label": "🔥 1 месяц", "emoji": "🔥"},
-    "3m": {"days": 90, "price": 469, "devices": 3, "label": "⭐ 3 месяца", "emoji": "⭐"},
-    "1y": {"days": 365, "price": 899, "devices": 5, "label": "💎 1 год", "emoji": "💎"},
+    "2d": {"days": 2, "price": 0, "traffic": 5, "label": "🎁 2 дня бесплатно", "emoji": "🎁"},
+    "1m": {"days": 30, "price": 139, "traffic": 1000, "label": "1 месяц", "emoji": "🔥"},
+    "3m": {"days": 90, "price": 469, "traffic": 1000, "label": "3 месяца", "emoji": "⭐"},
+    "1y": {"days": 365, "price": 899, "traffic": 1000, "label": "1 год", "emoji": "💎"},
 }
 
-logging.basicConfig(level=logging.INFO)
+# Состояния
+SELECTING_ACTION, SELECTING_PLAN, WAITING_PAYMENT = range(3)
+
+# ======================= ЛОГИРОВАНИЕ =======================
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 
-# ======================= БАЗА ДАННЫХ =======================
-def init_db():
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY,
-                  username TEXT,
-                  first_name TEXT,
-                  last_name TEXT,
-                  registration_date TIMESTAMP,
-                  current_subscription TEXT,
-                  subscription_end TIMESTAMP,
-                  devices INTEGER DEFAULT 1,
-                  subscription_uuid TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS subscriptions
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  plan_id TEXT,
-                  start_date TIMESTAMP,
-                  end_date TIMESTAMP,
-                  status TEXT,
-                  price INTEGER,
-                  payment_id TEXT,
-                  vpn_key TEXT,
-                  uuid TEXT,
-                  client_id TEXT,
-                  port INTEGER,
-                  subscription_uuid TEXT,
-                  FOREIGN KEY (user_id) REFERENCES users (user_id))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS vpn_keys
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  key TEXT UNIQUE,
-                  user_id INTEGER,
-                  subscription_id INTEGER,
-                  created_at TIMESTAMP,
-                  expires_at TIMESTAMP,
-                  status TEXT DEFAULT 'active',
-                  devices INTEGER DEFAULT 1,
-                  uuid TEXT,
-                  client_id TEXT,
-                  port INTEGER,
-                  subscription_uuid TEXT,
-                  FOREIGN KEY (user_id) REFERENCES users (user_id),
-                  FOREIGN KEY (subscription_id) REFERENCES subscriptions (id))''')
-    conn.commit()
-    conn.close()
-    logger.info("База данных инициализирована")
+# ======================= РАБОТА С БАЗОЙ =======================
+class UserDB:
+    def __init__(self, db_file=DB_FILE):
+        self.db_file = db_file
+        self.data = self.load()
 
-init_db()
+    def load(self):
+        try:
+            with open(self.db_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
-# ======================= РАБОТА С 3X-UI =======================
-class XrayAPI:
+    def save(self):
+        with open(self.db_file, 'w', encoding='utf-8') as f:
+            json.dump(self.data, f, indent=2, ensure_ascii=False)
+
+    def get_user(self, user_id: int) -> dict:
+        user_id_str = str(user_id)
+        if user_id_str not in self.data:
+            self.data[user_id_str] = {
+                "user_id": user_id,
+                "username": None,
+                "first_name": None,
+                "subscriptions": [],
+                "created_at": datetime.now().isoformat()
+            }
+            self.save()
+        return self.data[user_id_str]
+
+    def add_subscription(self, user_id: int, sub_data: dict):
+        user = self.get_user(user_id)
+        user["subscriptions"].append(sub_data)
+        self.save()
+
+    def get_active_subscriptions(self, user_id: int) -> list:
+        user = self.get_user(user_id)
+        active = []
+        now = datetime.now()
+        for sub in user["subscriptions"]:
+            expiry = datetime.fromisoformat(sub["expiry_date"])
+            if expiry > now and sub.get("active", True):
+                active.append(sub)
+        return active
+
+    def has_free_trial(self, user_id: int) -> bool:
+        user = self.get_user(user_id)
+        for sub in user["subscriptions"]:
+            if sub.get("plan_key") == "2d" and sub.get("active", True):
+                return True
+        return False
+
+    def update_subscription(self, user_id: int, sub_id: str, data: dict):
+        user = self.get_user(user_id)
+        for sub in user["subscriptions"]:
+            if sub.get("sub_id") == sub_id:
+                sub.update(data)
+                self.save()
+                return True
+        return False
+
+
+db = UserDB()
+
+
+# ======================= РАБОТА С 3XUI =======================
+class PanelClient:
     def __init__(self):
+        self.base_url = PANEL_URL
+        self.username = PANEL_USERNAME
+        self.password = PANEL_PASSWORD
+        self.api_token = PANEL_API_TOKEN
+        self.inbound_id = PANEL_INBOUND_ID
         self.session = requests.Session()
         self.session.verify = False
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*"
-        })
-        path = XRAY_PANEL_PATH if XRAY_PANEL_PATH.endswith("/") else XRAY_PANEL_PATH + "/"
-        self.base_url = f"{XRAY_PANEL_URL}{path}".rstrip("/")
-        self.panel_root = f"{XRAY_PANEL_URL}{path}"
-        self.logged_in = False
         self.csrf_token = None
-        logger.info(f"🔧 Инициализация API: {self.base_url}")
-        self.login()
 
-    def login(self) -> bool:
-        """Авторизация через GET параметры (старый способ)"""
+    def login(self):
         try:
-            # Пробуем авторизацию через GET параметры
-            url = f"{self.panel_root}?username={XRAY_USERNAME}&password={XRAY_PASSWORD}"
-            logger.info(f"📤 GET авторизация: {url}")
-            
-            response = self.session.get(url, timeout=30)
-            logger.info(f"📥 GET статус: {response.status_code}")
-            
-            if response.status_code == 200:
-                # Проверяем куки
-                if self.session.cookies:
-                    self.logged_in = True
-                    logger.info("✅ Авторизация через GET успешна!")
-                    logger.info(f"🍪 Cookies: {self.session.cookies.get_dict()}")
-                    return True
-            
-            # Если GET не сработал, пробуем через POST
-            logger.info("🔄 Пробуем POST с Basic Auth...")
-            return self.login_basic()
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка авторизации GET: {e}")
-            return False
-    
-    def login_basic(self) -> bool:
-        """Авторизация через Basic Auth"""
-        try:
-            url = f"{self.base_url}/login"
-            
-            # Добавляем Basic Auth заголовок
-            import base64
-            auth_str = f"{XRAY_USERNAME}:{XRAY_PASSWORD}"
-            auth_bytes = auth_str.encode('ascii')
-            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
-            
+            response = self.session.get(self.base_url, timeout=10)
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            csrf_meta = soup.find('meta', {'name': 'csrf-token'})
+            if csrf_meta:
+                self.csrf_token = csrf_meta.get('content')
+
+            login_url = f"{self.base_url}/login"
             headers = {
-                "Authorization": f"Basic {auth_b64}",
-                "Content-Type": "application/x-www-form-urlencoded"
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-CSRF-TOKEN": self.csrf_token,
+                "X-Requested-With": "XMLHttpRequest"
             }
-            
-            data = {
-                "username": XRAY_USERNAME,
-                "password": XRAY_PASSWORD
+            payload = {
+                "username": self.username,
+                "password": self.password,
+                "csrf_token": self.csrf_token
             }
-            
-            logger.info("📤 POST с Basic Auth")
-            response = self.session.post(url, data=data, headers=headers, timeout=30)
-            
-            logger.info(f"📥 POST статус: {response.status_code}")
-            logger.info(f"📥 POST ответ: {response.text[:200] if response.text else 'empty'}")
-            
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    if result.get('success'):
-                        self.logged_in = True
-                        logger.info("✅ Авторизация через Basic Auth успешна!")
-                        return True
-                except:
-                    pass
-            
-            # Если ничего не помогло, пробуем через куки из браузера
-            logger.info("🔄 Пробуем через cookies...")
-            return self.login_cookie()
-            
+
+            response = self.session.post(login_url, json=payload, headers=headers, timeout=10)
+            return response.status_code == 200
         except Exception as e:
-            logger.error(f"❌ Ошибка Basic Auth: {e}")
-            return False
-    
-    def login_cookie(self) -> bool:
-        """Авторизация через cookies (сессия из браузера)"""
-        try:
-            # Здесь мы просто проверяем, есть ли уже куки
-            if self.session.cookies:
-                self.logged_in = True
-                logger.info("✅ Авторизация по существующим кукам!")
-                return True
-            
-            # Пробуем получить куки через GET на корень
-            response = self.session.get(self.panel_root, timeout=30)
-            if response.status_code == 200 and self.session.cookies:
-                self.logged_in = True
-                logger.info("✅ Авторизация по кукам после GET!")
-                return True
-            
-            logger.error("❌ Все способы авторизации не сработали")
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка cookie авторизации: {e}")
+            logger.error(f"Login error: {e}")
             return False
 
-    def add_client(self, client_uuid: str, email: str, expiry_time: int, sub_id: str) -> bool:
-        """Создание клиента"""
-        logger.info(f"📤 Попытка создания клиента: {email}")
-        logger.info(f"📤 Текущий статус logged_in: {self.logged_in}")
-        
-        if not self.logged_in:
-            logger.info("🔄 Пытаемся залогиниться...")
-            if not self.login():
-                logger.error("❌ Не удалось авторизоваться")
-                return False
+    def generate_uuid(self):
+        return str(uuid.uuid4())
 
-        endpoint = f"{self.base_url}/panel/api/inbounds/addClient"
-        logger.info(f"📤 Эндпоинт: {endpoint}")
+    def generate_sub_id(self, length=16):
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+    def generate_email(self, length=10):
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+    def generate_password(self, length=16):
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+    def generate_auth(self, length=16):
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+    def create_client(self, days: int, traffic_gb: int = 1000, email: str = None) -> Optional[dict]:
+        """Создает клиента в панели с указанным трафиком"""
+        if not self.login():
+            logger.error("Failed to login to panel")
+            return None
+
+        if not email:
+            email = self.generate_email()
+
+        client_uuid = self.generate_uuid()
+        sub_id = self.generate_sub_id()
+        password = self.generate_password()
+        auth = self.generate_auth()
+        expiry_time = int((datetime.now() + timedelta(days=days)).timestamp() * 1000)
 
         client_data = {
-            "id": client_uuid,
-            "email": email,
-            "flow": "xtls-rprx-vision",
-            "limitIp": 0,
-            "totalGB": 0,
-            "expiryTime": expiry_time,
-            "enable": True,
-            "tgId": "",
-            "subId": sub_id,
-            "reset": 0,
+            "client": {
+                "id": client_uuid,
+                "security": "auto",
+                "password": password,
+                "auth": auth,
+                "email": email,
+                "limitIp": 0,
+                "totalGB": traffic_gb,  # Трафик в GB
+                "expiryTime": expiry_time,
+                "enable": True,
+                "tgId": 0,
+                "subId": sub_id,
+                "comment": f"Created {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                "reset": 0
+            },
+            "inboundIds": [self.inbound_id]
         }
 
-        payload = {
-            "id": XRAY_INBOUND_ID,
-            "settings": json.dumps({"clients": [client_data]})
+        url = f"{self.base_url}/panel/api/clients/add"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-CSRF-TOKEN": self.csrf_token,
+            "Authorization": f"Bearer {self.api_token}"
         }
-
-        logger.info(f"📤 Payload: {json.dumps(payload, indent=2)}")
 
         try:
-            response = self.session.post(endpoint, json=payload, timeout=30)
-            logger.info(f"📥 Статус: {response.status_code}")
-            logger.info(f"📥 Ответ: {response.text[:500]}")
-            
+            response = self.session.post(url, json=client_data, headers=headers, timeout=10)
             if response.status_code == 200:
-                try:
-                    result = response.json()
-                    if result.get('success'):
-                        logger.info(f"✅ Клиент {email} создан!")
-                        return True
-                except:
-                    logger.info("✅ Клиент создан (статус 200)")
-                    return True
-            
-            logger.error(f"❌ Ошибка: статус {response.status_code}")
-            return False
-            
+                result = response.json()
+                if result.get('success'):
+                    return {
+                        "email": email,
+                        "uuid": client_uuid,
+                        "sub_id": sub_id,
+                        "password": password,
+                        "auth": auth,
+                        "expiry_time": expiry_time,
+                        "expiry_date": datetime.fromtimestamp(expiry_time / 1000).isoformat(),
+                        "traffic_gb": traffic_gb
+                    }
+            logger.error(f"Create client error: {response.text}")
+            return None
         except Exception as e:
-            logger.error(f"❌ Ошибка запроса: {e}")
-            return False
+            logger.error(f"Error creating client: {e}")
+            return None
 
-xray_api = XrayAPI()
+    def generate_vless_link(self, uuid: str, email: str) -> str:
+        return f"vless://{uuid}@2.26.70.65:40224?encryption=none&security=none&type=ws&path=/vpn&flow=xtls-rprx-vision&sni=2.26.70.65#{email}"
 
-# ======================= ОСТАЛЬНЫЕ ФУНКЦИИ =======================
-def generate_sub_id() -> str:
-    return pysecrets.token_hex(8)
 
-def generate_vless_link(client_uuid: str, email: str) -> str:
-    return (f"vless://{client_uuid}@{VPN_SERVER_IP}:{VPN_SERVER_PORT}?type=ws&security=none&encryption=none&host={VPN_DOMAIN}&path={VPN_PATH}#{email}")
+panel_client = PanelClient()
 
-def create_vpn_user(user_id: int, plan_id: str) -> tuple:
-    client_uuid = str(uuid.uuid4())
-    email = f"user_{user_id}_{int(datetime.now().timestamp())}"
-    sub_id = generate_sub_id()
-    plan = PLANS[plan_id]
-    expiry_time = int((datetime.now() + timedelta(days=plan['days'])).timestamp() * 1000)
 
-    success = xray_api.add_client(client_uuid, email, expiry_time, sub_id)
-    vless_link = generate_vless_link(client_uuid, email)
-    return vless_link, client_uuid, email, sub_id, success
+# ======================= ЮKASSA =======================
+class YooKassaClient:
+    def __init__(self):
+        self.shop_id = YKASSA_SHOP_ID
+        self.secret_key = YKASSA_SECRET_KEY
+        self.api_url = YKASSA_API_URL
 
-def get_user(user_id: int) -> Optional[Dict]:
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    user = c.fetchone()
-    conn.close()
-    if user:
-        return {
-            'user_id': user[0],
-            'username': user[1],
-            'first_name': user[2],
-            'last_name': user[3],
-            'registration_date': user[4],
-            'current_subscription': user[5],
-            'subscription_end': user[6],
-            'devices': user[7],
-            'subscription_uuid': user[8] if len(user) > 8 else None
+    def create_payment(self, amount: int, description: str, user_id: int, plan_key: str) -> Optional[dict]:
+        """Создает платеж в ЮKassa"""
+        auth = f"{self.shop_id}:{self.secret_key}"
+        auth_b64 = base64.b64encode(auth.encode()).decode()
+
+        payment_data = {
+            "amount": {
+                "value": f"{amount:.2f}",
+                "currency": "RUB"
+            },
+            "confirmation": {
+                "type": "redirect",
+                "return_url": "https://t.me/KildearVPN_bot"
+            },
+            "capture": True,
+            "description": description,
+            "metadata": {
+                "user_id": str(user_id),
+                "plan_key": plan_key
+            }
         }
-    return None
 
-def create_user(user_id: int, username: str, first_name: str, last_name: str = None):
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("""INSERT OR IGNORE INTO users
-                 (user_id, username, first_name, last_name, registration_date, devices)
-                 VALUES (?, ?, ?, ?, ?, ?)""",
-              (user_id, username, first_name, last_name, datetime.now(), 1))
-    conn.commit()
-    conn.close()
-
-def get_active_subscription(user_id: int) -> Optional[Dict]:
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("""SELECT * FROM subscriptions
-                 WHERE user_id = ? AND status = 'active' AND end_date > datetime('now')
-                 ORDER BY end_date DESC LIMIT 1""", (user_id,))
-    sub = c.fetchone()
-    conn.close()
-    if sub:
-        return {
-            'id': sub[0],
-            'user_id': sub[1],
-            'plan_id': sub[2],
-            'start_date': sub[3],
-            'end_date': sub[4],
-            'status': sub[5],
-            'price': sub[6],
-            'payment_id': sub[7],
-            'vpn_key': sub[8] if len(sub) > 8 else None,
-            'uuid': sub[9] if len(sub) > 9 else None,
-            'client_id': sub[10] if len(sub) > 10 else None,
-            'port': sub[11] if len(sub) > 11 else None,
-            'subscription_uuid': sub[12] if len(sub) > 12 else None
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {auth_b64}",
+            "Idempotence-Key": str(uuid.uuid4())
         }
-    return None
 
-def create_subscription(user_id: int, plan_id: str, price: int, payment_id: str = None):
-    plan = PLANS[plan_id]
-    start_date = datetime.now()
-    end_date = start_date + timedelta(days=plan['days'])
+        try:
+            logger.info(f"Sending payment request: {payment_data}")
+            response = requests.post(self.api_url, json=payment_data, headers=headers, timeout=30)
 
-    vpn_key, client_uuid, client_id, sub_id, success = create_vpn_user(user_id, plan_id)
+            if response.status_code in [200, 201]:
+                result = response.json()
+                logger.info(f"Payment created: {result}")
+                return result
+            else:
+                logger.error(f"YooKassa error: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"YooKassa exception: {e}")
+            return None
 
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
+    def get_payment_status(self, payment_id: str) -> Optional[dict]:
+        """Получает статус платежа"""
+        auth = f"{self.shop_id}:{self.secret_key}"
+        auth_b64 = base64.b64encode(auth.encode()).decode()
 
-    status = 'active' if success else 'failed'
+        url = f"{self.api_url}/{payment_id}"
+        headers = {
+            "Authorization": f"Basic {auth_b64}"
+        }
 
-    if success:
-        c.execute("UPDATE subscriptions SET status = 'inactive' WHERE user_id = ? AND status = 'active'", (user_id,))
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            logger.error(f"Error getting payment status: {e}")
+            return None
 
-    c.execute("""INSERT INTO subscriptions
-                 (user_id, plan_id, start_date, end_date, status, price, payment_id, vpn_key, uuid, client_id, port, subscription_uuid)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-              (user_id, plan_id, start_date, end_date, status, price, payment_id, vpn_key, client_uuid, client_id, VPN_SERVER_PORT, sub_id))
 
-    subscription_id = c.lastrowid
+yookassa_client = YooKassaClient()
 
-    if success:
-        c.execute("""INSERT INTO vpn_keys
-                     (key, user_id, subscription_id, created_at, expires_at, status, devices, uuid, client_id, port, subscription_uuid)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                  (vpn_key, user_id, subscription_id, start_date, end_date, 'active', plan['devices'], client_uuid, client_id, VPN_SERVER_PORT, sub_id))
 
-        c.execute("""UPDATE users
-                     SET current_subscription = ?, subscription_end = ?, devices = ?, subscription_uuid = ?
-                     WHERE user_id = ?""",
-                  (plan_id, end_date, plan['devices'], sub_id, user_id))
+# ======================= QR КОД =======================
+def generate_qr_code_base64(link: str) -> Optional[str]:
+    try:
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=8,
+            border=2,
+        )
+        qr.add_data(link)
+        qr.make(fit=True)
 
-    conn.commit()
-    conn.close()
+        img = qr.make_image(fill_color="black", back_color="white")
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        return img_str
+    except Exception as e:
+        logger.error(f"QR code error: {e}")
+        return None
 
-    if success:
-        logger.info(f"✅ Подписка создана: user={user_id}, plan={plan_id}")
-    else:
-        logger.error(f"❌ Подписка НЕ активирована: user={user_id}, plan={plan_id}")
-
-    return subscription_id, vpn_key, success
-
-def get_user_vpn_keys(user_id: int) -> list:
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("""SELECT key, expires_at, status, devices, port FROM vpn_keys
-                 WHERE user_id = ? AND status = 'active' AND expires_at > datetime('now')
-                 ORDER BY created_at DESC""", (user_id,))
-    keys = c.fetchall()
-    conn.close()
-    return keys
 
 # ======================= КЛАВИАТУРЫ =======================
 def get_main_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Купить подписку", callback_data="buy_subscription")],
-        [InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys")],
-        [InlineKeyboardButton(text="📥 Ссылка для подписки", callback_data="my_subscription")],
-        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="my_profile")],
-        [InlineKeyboardButton(text="🆘 Помощь", callback_data="help")]
-    ])
+    keyboard = [
+        [InlineKeyboardButton("📡 Купить VPN", callback_data="buy")],
+        [InlineKeyboardButton("📋 Мои подписки", callback_data="my_subs")],
+        [InlineKeyboardButton("🆘 Помощь", callback_data="help")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 
 def get_plans_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    for plan_id, plan in PLANS.items():
-        price_text = f"{plan['price']} ₽" if plan['price'] > 0 else "Бесплатно"
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text=f"{plan['emoji']} {plan['label']} — {price_text}", callback_data=f"plan_{plan_id}")
+    keyboard = []
+    for key, plan in PLANS.items():
+        price_text = "🎁 Бесплатно" if plan["price"] == 0 else f"{plan['price']} ₽"
+        traffic_text = f"{plan['traffic']} GB" if plan['traffic'] < 1000 else "1 TB"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{plan['emoji']} {plan['label']} - {price_text} ({traffic_text})",
+                callback_data=f"plan_{key}"
+            )
         ])
-    keyboard.inline_keyboard.append([
-        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
-    ])
-    return keyboard
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
+    return InlineKeyboardMarkup(keyboard)
 
-def get_keys_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить ключи", callback_data="refresh_keys")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
-    ])
+
+def get_payment_keyboard(payment_url: str):
+    keyboard = [
+        [InlineKeyboardButton("💳 Перейти к оплате", url=payment_url)],
+        [InlineKeyboardButton("✅ Проверить оплату", callback_data="check_payment")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_payment")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_subscription_keyboard(sub_id: str):
+    keyboard = [
+        [InlineKeyboardButton("📱 QR-код", callback_data=f"qr_{sub_id}")],
+        [InlineKeyboardButton("🔙 Назад к списку", callback_data="my_subs")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 
 # ======================= ОБРАБОТЧИКИ =======================
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    create_user(user_id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
-    await message.answer(
-        "🌟 <b>Добро пожаловать в VPN сервис Kildear!</b>\n\n📋 Тарифы:\n• 🎁 2 дня бесплатно\n• 🔥 1 месяц — 139 ₽\n• ⭐ 3 месяца — 469 ₽\n• 💎 1 год — 899 ₽",
-        reply_markup=get_main_keyboard(), parse_mode="HTML"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db.get_user(user.id)
+
+    welcome_text = f"""
+👋 Привет, {user.first_name}!
+
+Добро пожаловать в **Kildear VPN** — твой надежный защитник в интернете! 🛡️
+
+🌐 Мы предлагаем:
+• 🚀 Быстрый и стабильный VPN
+• 🔒 Защита от слежки
+• 🌍 Доступ к заблокированным сайтам
+• 📊 До 1 ТБ трафика
+
+🎁 Попробуй **2 дня бесплатно!**
+💰 Цены от 139 ₽ в месяц
+
+Выбери действие в меню ниже 👇
+    """
+
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
     )
 
-@dp.callback_query(F.data == "back_to_main")
-async def back_to_main(callback: CallbackQuery):
-    await callback.message.edit_text("🏠 Главное меню", reply_markup=get_main_keyboard(), parse_mode="HTML")
-    await callback.answer()
 
-@dp.callback_query(F.data == "buy_subscription")
-async def show_plans(callback: CallbackQuery):
-    active_sub = get_active_subscription(callback.from_user.id)
-    plans_text = "📱 Выберите тариф:\n\n"
-    if active_sub:
-        try:
-            end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
-            days_left = (end_date - datetime.now()).days
-            if days_left > 0:
-                plans_text += f"✅ Активна до {end_date.strftime('%d.%m.%Y')} (осталось {days_left} дн.)\n\n"
-        except:
-            pass
-    for plan_id, plan in PLANS.items():
-        price_text = f"{plan['price']} ₽" if plan['price'] > 0 else "Бесплатно"
-        plans_text += f"{plan['emoji']} {plan['label']} — {price_text}\n"
-    await callback.message.edit_text(plans_text, reply_markup=get_plans_keyboard(), parse_mode="HTML")
-    await callback.answer()
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = f"""
+🆘 **Помощь и инструкция**
 
-@dp.callback_query(F.data == "my_keys")
-async def show_keys(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    keys = get_user_vpn_keys(user_id)
-    if not keys:
-        await callback.message.edit_text("🔑 Нет активных ключей", reply_markup=get_keys_keyboard(), parse_mode="HTML")
-        await callback.answer()
+📌 **Как купить подписку:**
+1. Нажми "📡 Купить VPN"
+2. Выбери тариф
+3. Оплати через ЮKassa
+4. Получи свой ключ и подписку
+
+📱 **Как подключиться:**
+1. Скачай VPN клиент (v2rayN, Nekoray, Clash)
+2. Скопируй VLESS ссылку или QR-код
+3. Импортируй подписку в клиент
+
+💬 **Поддержка:** @{SUPPORT_USERNAME}
+
+🔗 **Наш канал:** @KildearVPN
+    """
+
+    await update.message.reply_text(
+        help_text,
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
+    )
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    user_id = query.from_user.id
+
+    if data == "back":
+        await query.edit_message_text(
+            "🏠 Главное меню",
+            reply_markup=get_main_keyboard()
+        )
         return
-    text = "🔑 Ваши ключи:\n\n"
-    for idx, key_data in enumerate(keys, 1):
-        key, expires_at, status, devices, port = key_data
-        expires = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S.%f')
-        days_left = (expires - datetime.now()).days
-        text += f"<b>#{idx}</b>\n<code>{key}</code>\n📱 {devices} уст. ⏳ {days_left} дн.\n\n"
-    await callback.message.edit_text(text, reply_markup=get_keys_keyboard(), parse_mode="HTML")
-    await callback.answer()
 
-@dp.callback_query(F.data == "my_subscription")
-async def show_subscription(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    active_sub = get_active_subscription(user_id)
-    if not active_sub:
-        await callback.message.edit_text("❌ Нет активной подписки", reply_markup=get_main_keyboard(), parse_mode="HTML")
-        await callback.answer()
+    if data == "buy":
+        await query.edit_message_text(
+            "📡 Выбери тарифный план:",
+            reply_markup=get_plans_keyboard()
+        )
         return
-    sub_id = active_sub.get('subscription_uuid', '')
-    subscription_url = f"{SUBSCRIPTION_BASE_URL}{sub_id}"
-    end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
-    text = f"📥 Ссылка для подписки:\n<code>{subscription_url}</code>\n\n📅 До: {end_date.strftime('%d.%m.%Y')}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Копировать", callback_data=f"copy_{sub_id}")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
-    ])
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
 
-@dp.callback_query(F.data.startswith("copy_"))
-async def copy_sub(callback: CallbackQuery):
-    sub_id = callback.data.replace("copy_", "")
-    await callback.message.answer(f"🔗 <code>{SUBSCRIPTION_BASE_URL}{sub_id}</code>", parse_mode="HTML")
-    await callback.answer("✅ Скопируйте!")
-
-@dp.callback_query(F.data == "refresh_keys")
-async def refresh_keys(callback: CallbackQuery):
-    await show_keys(callback)
-
-@dp.callback_query(F.data.startswith("plan_"))
-async def process_plan(callback: CallbackQuery):
-    plan_id = callback.data.replace("plan_", "")
-    plan = PLANS.get(plan_id)
-    if not plan:
-        await callback.answer("❌ Тариф не найден")
+    if data == "my_subs":
+        await show_subscriptions(query)
         return
-    user_id = callback.from_user.id
 
-    if plan['price'] == 0:
-        conn = sqlite3.connect('subscriptions.db')
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM subscriptions WHERE user_id = ? AND plan_id = '2d' AND status != 'failed'", (user_id,))
-        count = c.fetchone()[0]
-        conn.close()
-        if count > 0:
-            await callback.answer("❌ Вы уже использовали бесплатный период!", show_alert=True)
+    if data == "help":
+        await query.edit_message_text(
+            f"🆘 Помощь\n\nПоддержка: @{SUPPORT_USERNAME}",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    if data.startswith("plan_"):
+        plan_key = data.replace("plan_", "")
+        plan = PLANS.get(plan_key)
+
+        if not plan:
+            await query.edit_message_text("❌ Тариф не найден")
             return
-        _, vpn_key, success = create_subscription(user_id, plan_id, 0)
-        if not success:
-            await callback.message.edit_text("⚠️ Не удалось создать ключ на сервере. Попробуйте ещё раз чуть позже.", reply_markup=get_main_keyboard(), parse_mode="HTML")
-            await callback.answer()
+
+        context.user_data["selected_plan"] = plan_key
+
+        if plan["price"] == 0:
+            await handle_free_plan(query, plan_key)
+        else:
+            await handle_paid_plan(query, plan_key, context)
+        return
+
+    if data == "check_payment":
+        await check_payment_status(query, context)
+        return
+
+    if data == "cancel_payment":
+        context.user_data.pop("payment_id", None)
+        context.user_data.pop("payment_plan", None)
+        await query.edit_message_text(
+            "❌ Оплата отменена",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    if data.startswith("sub_"):
+        sub_id = data.replace("sub_", "")
+        await show_subscription_details(query, sub_id)
+        return
+
+    if data.startswith("qr_"):
+        sub_id = data.replace("qr_", "")
+        await show_qr_code(query, sub_id)
+        return
+
+
+async def handle_free_plan(query, plan_key: str):
+    user_id = query.from_user.id
+    plan = PLANS[plan_key]
+
+    if db.has_free_trial(user_id):
+        await query.edit_message_text(
+            "❌ Вы уже использовали бесплатный тариф!\n\n"
+            "Выберите платный тариф для продолжения:",
+            reply_markup=get_plans_keyboard()
+        )
+        return
+
+    client = panel_client.create_client(days=plan["days"], traffic_gb=plan["traffic"])
+
+    if not client:
+        await query.edit_message_text(
+            "❌ Ошибка при создании ключа. Попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    sub_data = {
+        "sub_id": client["sub_id"],
+        "plan_key": plan_key,
+        "email": client["email"],
+        "uuid": client["uuid"],
+        "vless_link": panel_client.generate_vless_link(client["uuid"], client["email"]),
+        "sub_link": f"{PANEL_SUB_URL}/{client['sub_id']}",
+        "expiry_date": client["expiry_date"],
+        "created_at": datetime.now().isoformat(),
+        "active": True,
+        "paid": False,
+        "traffic_gb": plan["traffic"]
+    }
+    db.add_subscription(user_id, sub_data)
+
+    await send_subscription_keys(query, sub_data)
+
+
+async def handle_paid_plan(query, plan_key: str, context: ContextTypes.DEFAULT_TYPE):
+    plan = PLANS[plan_key]
+    user_id = query.from_user.id
+
+    payment_desc = f"Подписка {plan['label']} Kildear VPN"
+
+    payment = yookassa_client.create_payment(
+        amount=plan["price"],
+        description=payment_desc,
+        user_id=user_id,
+        plan_key=plan_key
+    )
+
+    if not payment:
+        await query.edit_message_text(
+            "❌ Ошибка при создании платежа. Попробуйте позже.\n"
+            f"Если проблема повторяется, обратитесь к @{SUPPORT_USERNAME}",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    context.user_data["payment_id"] = payment["id"]
+    context.user_data["payment_plan"] = plan_key
+
+    payment_url = payment["confirmation"]["confirmation_url"]
+
+    await query.edit_message_text(
+        f"""
+💳 **Оплата подписки {plan['label']}**
+
+💰 Сумма: {plan['price']} ₽
+📊 Трафик: {plan['traffic']} GB
+⏰ Длительность: {plan['days']} дней
+
+Нажмите кнопку ниже, чтобы перейти к оплате.
+После оплаты нажмите "✅ Проверить оплату".
+        """,
+        reply_markup=get_payment_keyboard(payment_url),
+        parse_mode="Markdown"
+    )
+
+
+async def check_payment_status(query, context: ContextTypes.DEFAULT_TYPE):
+    payment_id = context.user_data.get("payment_id")
+    plan_key = context.user_data.get("payment_plan")
+
+    if not payment_id:
+        await query.edit_message_text(
+            "❌ Платеж не найден. Попробуйте выбрать тариф заново.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    payment_status = yookassa_client.get_payment_status(payment_id)
+
+    if not payment_status:
+        await query.edit_message_text(
+            "❌ Не удалось проверить статус оплаты. Попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    if payment_status.get("status") == "succeeded":
+        await query.edit_message_text("✅ Оплата подтверждена! Создаю ваш ключ...")
+
+        plan = PLANS[plan_key]
+        user_id = query.from_user.id
+
+        client = panel_client.create_client(days=plan["days"], traffic_gb=plan["traffic"])
+
+        if not client:
+            await query.edit_message_text(
+                f"❌ Ошибка при создании ключа. Обратитесь к @{SUPPORT_USERNAME}",
+                reply_markup=get_main_keyboard()
+            )
             return
-        text = f"🎉 Бесплатная подписка активирована!\n\n📅 {plan['days']} дней\n🔌 Порт: {VPN_SERVER_PORT}\n\n🔑 Ключ:\n<code>{vpn_key}</code>"
-        await callback.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
-        await callback.answer()
-        return
 
-    text = f"💳 <b>Оплата подписки</b>\n\nТариф: {plan['label']}\nСумма: {plan['price']} ₽\n\n⚠️ <b>Тестовый режим</b>"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Тестовая активация", callback_data=f"test_{plan_id}")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
-    ])
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
+        sub_data = {
+            "sub_id": client["sub_id"],
+            "plan_key": plan_key,
+            "email": client["email"],
+            "uuid": client["uuid"],
+            "vless_link": panel_client.generate_vless_link(client["uuid"], client["email"]),
+            "sub_link": f"{PANEL_SUB_URL}/{client['sub_id']}",
+            "expiry_date": client["expiry_date"],
+            "created_at": datetime.now().isoformat(),
+            "active": True,
+            "paid": True,
+            "payment_id": payment_id,
+            "traffic_gb": plan["traffic"]
+        }
+        db.add_subscription(user_id, sub_data)
 
-@dp.callback_query(F.data.startswith("test_"))
-async def test_activate(callback: CallbackQuery):
-    plan_id = callback.data.replace("test_", "")
-    plan = PLANS.get(plan_id)
-    user_id = callback.from_user.id
-    if not plan:
-        await callback.answer("❌ Ошибка")
-        return
-    _, vpn_key, success = create_subscription(user_id, plan_id, plan['price'], "test")
-    if not success:
-        await callback.message.edit_text("⚠️ Не удалось создать ключ на сервере. Попробуйте ещё раз через минуту.", reply_markup=get_main_keyboard(), parse_mode="HTML")
-        await callback.answer()
-        return
-    text = f"✅ Подписка активирована!\n\n🎉 {plan['label']}\n📅 {plan['days']} дней\n🔌 Порт: {VPN_SERVER_PORT}\n\n🔑 Ключ:\n<code>{vpn_key}</code>"
-    await callback.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
-    await callback.answer()
+        await send_subscription_keys(query, sub_data)
 
-@dp.callback_query(F.data == "my_profile")
-async def show_profile(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = get_user(user_id)
-    active_sub = get_active_subscription(user_id)
-    keys = get_user_vpn_keys(user_id)
-    text = f"👤 Профиль\n\n🆔 ID: {user_id}"
-    if user:
-        text += f"\n📝 Имя: {user.get('first_name', '?')}"
-    if active_sub:
-        try:
-            end_date = datetime.strptime(active_sub['end_date'], '%Y-%m-%d %H:%M:%S.%f')
-            days_left = (end_date - datetime.now()).days
-            plan = PLANS.get(active_sub['plan_id'], {})
-            text += f"\n\n📱 Подписка: {plan.get('label', '?')}"
-            text += f"\n📅 До: {end_date.strftime('%d.%m.%Y')} ({days_left} дн.)"
-            text += f"\n🔌 Порт: {active_sub.get('port', '?')}"
-        except:
-            pass
+        context.user_data.pop("payment_id", None)
+        context.user_data.pop("payment_plan", None)
+
+    elif payment_status.get("status") == "pending":
+        payment_url = payment_status.get("confirmation", {}).get("confirmation_url", "")
+        await query.edit_message_text(
+            "⏳ Платеж еще не завершен. Подождите или оплатите по ссылке.",
+            reply_markup=get_payment_keyboard(payment_url)
+        )
     else:
-        text += "\n\n❌ Нет подписки"
-    text += f"\n🔑 Ключей: {len(keys)}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Купить", callback_data="buy_subscription")],
-        [InlineKeyboardButton(text="🔑 Ключи", callback_data="my_keys")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
-    ])
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
+        await query.edit_message_text(
+            f"❌ Статус платежа: {payment_status.get('status')}\n"
+            "Попробуйте оплатить заново.",
+            reply_markup=get_plans_keyboard()
+        )
 
-@dp.callback_query(F.data == "help")
-async def show_help(callback: CallbackQuery):
-    text = "🆘 Помощь\n\n1. Нажмите 'Купить подписку'\n2. Выберите тариф\n3. Нажмите 'Тестовая активация'\n\nКлюч появится в 'Мои ключи'."
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
-    ])
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
 
-# ======================= WEBHOOK =======================
-async def webhook_handler(request):
-    try:
-        data = await request.json()
-        update = types.Update(**data)
-        await dp.feed_update(bot, update)
-        return web.Response(status=200)
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        return web.Response(status=500)
+async def show_subscriptions(query):
+    user_id = query.from_user.id
+    subscriptions = db.get_active_subscriptions(user_id)
 
-async def on_startup():
-    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost')}/webhook"
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        await bot.set_webhook(webhook_url)
-        logger.info(f"✅ Вебхук: {webhook_url}")
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
+    if not subscriptions:
+        await query.edit_message_text(
+            "📋 У вас нет активных подписок.\n\n"
+            "Выберите тариф, чтобы начать пользоваться VPN:",
+            reply_markup=get_plans_keyboard()
+        )
+        return
 
-async def main():
-    port = int(os.environ.get('PORT', 8080))
-    app = web.Application()
-    app.router.add_post('/webhook', webhook_handler)
-    app.router.add_get('/', lambda request: web.Response(text='Bot is running!'))
-    await on_startup()
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"🚀 Бот запущен на порту {port}")
-    logger.info(f"📡 Панель: {XRAY_PANEL_URL}{XRAY_PANEL_PATH}")
-    try:
-        await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен")
+    text = "📋 Ваши активные подписки:\n\n"
+    keyboard = []
+
+    for sub in subscriptions:
+        expiry = datetime.fromisoformat(sub["expiry_date"])
+        days_left = (expiry - datetime.now()).days
+        plan_key = sub.get("plan_key", "unknown")
+        plan = PLANS.get(plan_key, {"emoji": "🔹", "label": "VPN"})
+        traffic = sub.get("traffic_gb", 5)
+        traffic_text = f"{traffic} GB" if traffic < 1000 else "1 TB"
+
+        text += f"{plan['emoji']} {plan['label']}\n"
+        text += f"   🆔 {sub['sub_id'][:12]}...\n"
+        text += f"   📊 Трафик: {traffic_text}\n"
+        text += f"   ⏰ Осталось: {days_left} дней\n\n"
+
+        keyboard.append([
+            InlineKeyboardButton(
+                f"📄 Подробнее о {sub['sub_id'][:8]}...",
+                callback_data=f"sub_{sub['sub_id']}"
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_subscription_details(query, sub_id: str):
+    user_id = query.from_user.id
+    user = db.get_user(user_id)
+
+    sub = None
+    for s in user["subscriptions"]:
+        if s.get("sub_id") == sub_id:
+            sub = s
+            break
+
+    if not sub:
+        await query.edit_message_text(
+            "❌ Подписка не найдена",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    plan_key = sub.get("plan_key", "unknown")
+    plan = PLANS.get(plan_key, {"label": "VPN", "emoji": "🔹"})
+    expiry = datetime.fromisoformat(sub["expiry_date"])
+    days_left = (expiry - datetime.now()).days
+    traffic = sub.get("traffic_gb", 5)
+    traffic_text = f"{traffic} GB" if traffic < 1000 else "1 TB"
+
+    text = f"""
+{plan['emoji']} **Подписка {plan['label']}**
+
+📊 **Детали:**
+• 🆔 SubId: `{sub['sub_id']}`
+• 👤 Email: `{sub['email']}`
+• 📅 Создана: {datetime.fromisoformat(sub['created_at']).strftime('%d.%m.%Y %H:%M')}
+• ⏰ Истекает: {expiry.strftime('%d.%m.%Y %H:%M')}
+• 📆 Осталось дней: {days_left}
+• 📊 Трафик: {traffic_text}
+
+🔗 **VLESS ссылка:**
+`{sub['vless_link']}`
+
+📋 **Ссылка подписки:**
+{sub['sub_link']}
+
+Импортируйте ссылку в ваш VPN клиент.
+    """
+
+    await query.edit_message_text(
+        text,
+        reply_markup=get_subscription_keyboard(sub_id),
+        parse_mode="Markdown"
+    )
+
+
+async def show_qr_code(query, sub_id: str):
+    user_id = query.from_user.id
+    user = db.get_user(user_id)
+
+    sub = None
+    for s in user["subscriptions"]:
+        if s.get("sub_id") == sub_id:
+            sub = s
+            break
+
+    if not sub:
+        await query.edit_message_text("❌ Подписка не найдена")
+        return
+
+    qr_base64 = generate_qr_code_base64(sub["vless_link"])
+
+    if qr_base64:
+        image_data = base64.b64decode(qr_base64)
+        await query.bot.send_photo(
+            chat_id=user_id,
+            photo=BytesIO(image_data),
+            caption=f"📱 QR-код для подписки {sub_id[:8]}..."
+        )
+        await query.edit_message_text(
+            "📱 QR-код отправлен выше!",
+            reply_markup=get_subscription_keyboard(sub_id)
+        )
+    else:
+        await query.edit_message_text(
+            "❌ Не удалось сгенерировать QR-код",
+            reply_markup=get_subscription_keyboard(sub_id)
+        )
+
+
+async def send_subscription_keys(query, sub_data: dict):
+    user_id = query.from_user.id
+    plan_key = sub_data.get("plan_key", "unknown")
+    plan = PLANS.get(plan_key, {"label": "VPN", "emoji": "🔹"})
+    expiry = datetime.fromisoformat(sub_data["expiry_date"])
+    traffic = sub_data.get("traffic_gb", 5)
+    traffic_text = f"{traffic} GB" if traffic < 1000 else "1 TB"
+
+    text = f"""
+🎉 **Поздравляем! Ваша подписка активирована!**
+
+{plan['emoji']} **Тариф:** {plan['label']}
+⏰ **Действует до:** {expiry.strftime('%d.%m.%Y %H:%M')}
+📊 **Трафик:** {traffic_text}
+
+🔗 **VLESS ссылка (скопируйте):**
+`{sub_data['vless_link']}`
+
+📋 **Ссылка подписки (для импорта):**
+{sub_data['sub_link']}
+
+💡 **Как подключиться:**
+1. Скачайте VPN клиент (v2rayN, Nekoray, Clash)
+2. Скопируйте VLESS ссылку выше
+3. Импортируйте в клиент
+4. Наслаждайтесь свободным интернетом! 🌐
+
+⚠️ Сохраните эти данные!
+    """
+
+    # Генерируем QR-код
+    qr_base64 = generate_qr_code_base64(sub_data["vless_link"])
+
+    if qr_base64:
+        image_data = base64.b64decode(qr_base64)
+        await query.bot.send_photo(
+            chat_id=user_id,
+            photo=BytesIO(image_data),
+            caption="📱 QR-код для быстрого подключения"
+        )
+
+    await query.edit_message_text(
+        text,
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
+    )
+
+
+# ======================= ЗАПУСК =======================
+def main():
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    print("🚀 Бот запущен!")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
