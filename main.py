@@ -45,6 +45,10 @@ SUPPORT_USERNAME = "kildear_vpn"
 
 DB_FILE = "users_db.json"
 
+# ======================= КОНСТАНТЫ =======================
+# 1 ГБ = 1073741824 байт
+GB_TO_BYTES = 1073741824
+
 # ======================= ТАРИФЫ =======================
 PLANS = {
     "2d": {"days": 2, "price": 0, "traffic": 5, "label": "🎁 2 дня бесплатно", "emoji": "🎁"},
@@ -198,6 +202,10 @@ class PanelClient:
         auth = self.generate_auth()
         expiry_time = int((datetime.now() + timedelta(days=days)).timestamp() * 1000)
         
+        # ПРАВИЛЬНЫЙ РАСЧЕТ ТРАФИКА: переводим ГБ в байты
+        # totalGB в 3xUI ожидает значение в байтах!
+        traffic_bytes = traffic_gb * GB_TO_BYTES
+        
         client_data = {
             "client": {
                 "id": client_uuid,
@@ -206,7 +214,7 @@ class PanelClient:
                 "auth": auth,
                 "email": email,
                 "limitIp": 0,
-                "totalGB": traffic_gb,  # Трафик в GB
+                "totalGB": traffic_bytes,  # Трафик в байтах!
                 "expiryTime": expiry_time,
                 "enable": True,
                 "tgId": 0,
@@ -230,6 +238,7 @@ class PanelClient:
             if response.status_code == 200:
                 result = response.json()
                 if result.get('success'):
+                    logger.info(f"Client created successfully with {traffic_gb} GB ({traffic_bytes} bytes)")
                     return {
                         "email": email,
                         "uuid": client_uuid,
@@ -238,7 +247,7 @@ class PanelClient:
                         "auth": auth,
                         "expiry_time": expiry_time,
                         "expiry_date": datetime.fromtimestamp(expiry_time/1000).isoformat(),
-                        "traffic_gb": traffic_gb
+                        "traffic_gb": traffic_gb  # Сохраняем в ГБ для отображения
                     }
             logger.error(f"Create client error: {response.text}")
             return None
